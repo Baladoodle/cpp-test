@@ -1,0 +1,95 @@
+#ifndef SHADER_HPP
+#define SHADER_HPP
+
+#include <string>
+#include <fstream>
+#include <sstream>
+#include <iostream>
+#include <epoxy/gl.h>
+#include <GLFW/glfw3.h>
+#include "MathUtils.hpp"
+
+class Shader {
+public:
+    GLuint programID = 0;
+
+    Shader() = default;
+    Shader(const char* vertexSrc, const char* fragmentSrc) {
+        compile(vertexSrc, fragmentSrc);
+    }
+    ~Shader() {
+        if (programID) glDeleteProgram(programID);
+    }
+
+    void compile(const char* vShaderCode, const char* fShaderCode) {
+        GLuint vertex = glCreateShader(GL_VERTEX_SHADER);
+        glShaderSource(vertex, 1, &vShaderCode, NULL);
+        glCompileShader(vertex);
+        checkCompileErrors(vertex, "VERTEX");
+
+        GLuint fragment = glCreateShader(GL_FRAGMENT_SHADER);
+        glShaderSource(fragment, 1, &fShaderCode, NULL);
+        glCompileShader(fragment);
+        checkCompileErrors(fragment, "FRAGMENT");
+
+        programID = glCreateProgram();
+        glAttachShader(programID, vertex);
+        glAttachShader(programID, fragment);
+        glLinkProgram(programID);
+        checkCompileErrors(programID, "PROGRAM");
+
+        glDeleteShader(vertex);
+        glDeleteShader(fragment);
+    }
+
+    void use() const {
+        if (programID) glUseProgram(programID);
+    }
+
+    GLint getUniformLoc(const std::string& name) const {
+        auto it = uniformCache.find(name);
+        if (it != uniformCache.end()) return it->second;
+        GLint loc = glGetUniformLocation(programID, name.c_str());
+        uniformCache[name] = loc;
+        return loc;
+    }
+
+    void setBool(const std::string& name, bool value) const {
+        glUniform1i(getUniformLoc(name), (int)value);
+    }
+    void setInt(const std::string& name, int value) const {
+        glUniform1i(getUniformLoc(name), value);
+    }
+    void setFloat(const std::string& name, float value) const {
+        glUniform1f(getUniformLoc(name), value);
+    }
+    void setVec3(const std::string& name, const Vec3& value) const {
+        glUniform3f(getUniformLoc(name), value.x, value.y, value.z);
+    }
+    void setMat4(const std::string& name, const Mat4& mat) const {
+        glUniformMatrix4fv(getUniformLoc(name), 1, GL_FALSE, mat.m);
+    }
+
+private:
+    mutable std::unordered_map<std::string, GLint> uniformCache;
+private:
+    void checkCompileErrors(GLuint shader, std::string type) {
+        GLint success;
+        GLchar infoLog[1024];
+        if (type != "PROGRAM") {
+            glGetShaderiv(shader, GL_COMPILE_STATUS, &success);
+            if (!success) {
+                glGetShaderInfoLog(shader, 1024, NULL, infoLog);
+                std::cerr << "ERROR::SHADER_COMPILATION_ERROR of type: " << type << "\n" << infoLog << "\n";
+            }
+        } else {
+            glGetProgramiv(shader, GL_LINK_STATUS, &success);
+            if (!success) {
+                glGetProgramInfoLog(shader, 1024, NULL, infoLog);
+                std::cerr << "ERROR::PROGRAM_LINKING_ERROR of type: " << type << "\n" << infoLog << "\n";
+            }
+        }
+    }
+};
+
+#endif // SHADER_HPP

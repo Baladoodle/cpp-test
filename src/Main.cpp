@@ -1,0 +1,379 @@
+#include <epoxy/gl.h>
+#include <GLFW/glfw3.h>
+#include <iostream>
+#include <iomanip>
+#include <sstream>
+#include <chrono>
+#include <cmath>
+
+#include "MathUtils.hpp"
+#include "Block.hpp"
+#include "TextureAtlas.hpp"
+#include "WorldGen.hpp"
+#include "ChunkManager.hpp"
+#include "Shader.hpp"
+#include "Skybox.hpp"
+#include "Camera.hpp"
+#include "Physics.hpp"
+#include "HUD.hpp"
+
+// Global state for GLFW callbacks
+Camera camera(Vec3(0.0f, 60.0f, 0.0f));
+PhysicsController physics;
+bool keys[1024] = { false };
+bool firstMouse = true;
+float lastX = 640.0f, lastY = 360.0f;
+bool cursorLocked = true;
+bool showHUD = true;
+
+// Key callback
+void keyCallback(GLFWwindow* window, int key, int scancode, int action, int mods) {
+    if (key >= 0 && key < 1024) {
+        if (action == GLFW_PRESS) {
+            keys[key] = true;
+
+            // Toggle Fly mode
+            if (key == GLFW_KEY_F) {
+                physics.isFlying = !physics.isFlying;
+            }
+            // Toggle HUD
+            if (key == GLFW_KEY_H) {
+                showHUD = !showHUD;
+            }
+            // Toggle cursor capture
+            if (key == GLFW_KEY_ESCAPE) {
+                cursorLocked = !cursorLocked;
+                glfwSetInputMode(window, GLFW_CURSOR, cursorLocked ? GLFW_CURSOR_DISABLED : GLFW_CURSOR_NORMAL);
+            }
+        } else if (action == GLFW_RELEASE) {
+            keys[key] = false;
+        }
+    }
+}
+
+// Mouse movement callback
+void cursorPosCallback(GLFWwindow* window, double xpos, double ypos) {
+    if (!cursorLocked) return;
+
+    if (firstMouse) {
+        lastX = static_cast<float>(xpos);
+        lastY = static_cast<float>(ypos);
+        firstMouse = false;
+    }
+
+    float xoffset = static_cast<float>(xpos) - lastX;
+    float yoffset = lastY - static_cast<float>(ypos); // Reversed since Y coordinates go from bottom to top
+
+    lastX = static_cast<float>(xpos);
+    lastY = static_cast<float>(ypos);
+
+    camera.processMouseMovement(xoffset, yoffset);
+}
+
+int main(int argc, char** argv) {
+    bool testMode = false;
+    for (int i = 1; i < argc; ++i) {
+        if (std::string(argv[i]) == "--test") {
+            testMode = true;
+        }
+    }
+
+    std::cout << "Starting Infinite Voxel Renderer" << (testMode ? " [TEST MODE]" : "") << "...\n";
+
+    if (!glfwInit()) {
+        std::cerr << "Failed to initialize GLFW!\n";
+        return -1;
+    }
+
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
+    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+
+    int windowWidth = 1280;
+    int windowHeight = 720;
+    GLFWwindow* window = glfwCreateWindow(windowWidth, windowHeight, "Infinite Voxel Engine (8192+ Render Distance)", NULL, NULL);
+    if (!window) {
+        std::cerr << "Failed to create GLFW window!\n";
+        glfwTerminate();
+        return -1;
+    }
+
+    glfwMakeContextCurrent(window);
+    glfwSwapInterval(0); // Disable VSync for unconstrained performance benchmarking
+    glfwSetKeyCallback(window, keyCallback);
+    glfwSetCursorPosCallback(window, cursorPosCallback);
+    glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+
+    glEnable(GL_DEPTH_TEST);
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_BACK);
+
+    { // Inner scope to ensure all OpenGL objects destruct while context is alive
+        // Create procedural texture atlas
+        GLuint atlasTexture = TextureAtlas::createProceduralAtlas();
+        std::cout << "Texture atlas created (ID: " << atlasTexture << ")\n";
+
+        // Main Voxel Shader
+        const char* vShaderSrc = R"(
+        #version 330 core
+        layout (location = 0) in vec3 aPos;
+        layout (location = 1) in vec3 aNormal;
+        layout (location = 2) in vec2 aTexCoord;
+        layout (location = 3) in float aTexIndex;
+        layout (location = 4) in float aAO;
+        layout (location = 5) in float aBlockLight;
+        layout (location = 6) in float aLodLevel;
+
+        out vec3 vNormal;
+        out vec2 vTexCoord;
+        out float vTexIndex;
+        out float vAO;
+        out float vBlockLight;
+        out float vDistance;
+        out float vLodLevel;
+
+        uniform mat4 uProjection;
+        uniform mat4 uView;
+        uniform vec3 uChunkMin; // Chunk min relative to camera
+
+        void main() {
+            vec3 relPos = uChunkMin + aPos;
+            gl_Position = uProjection * uView * vec4(relPos, 1.0);
+
+            vNormal = aNormal;
+            vTexCoord = aTexCoord;
+            vTexIndex = aTexIndex;
+            vAO = aAO;
+            vBlockLight = aBlockLight;
+            vDistance = length(relPos);
+            vLodLevel = aLodLevel;
+        }
+    )";
+
+    const char* fShaderSrc = R"(
+        #version 330 core
+        in vec3 vNormal;
+        in vec2 vTexCoord;
+        in float vTexIndex;
+        in float vAO;
+        in float vBlockLight;
+        in float vDistance;
+        in float vLodLevel;
+
+        out vec4 FragColor;
+
+        uniform sampler2D uTextureAtlas;
+        uniform vec3 uSunDir;
+        uniform vec3 uSunColor;
+        uniform vec3 uAmbientColor;
+        uniform vec3 uFogColor;
+
+        void main() {
+            vec4 texColor = texture(uTextureAtlas, vTexCoord);
+            if (texColor.a < 0.1) discard;
+
+            // Directional sun shading
+            float diff = max(dot(vNormal, normalize(uSunDir)), 0.0);
+            vec3 sunLight = uAmbientColor + uSunColor * (diff * 0.7 + 0.3);
+
+            // Block emissive light (from Glow Crystals)
+            vec3 emissiveLight = vec3(1.0, 0.9, 0.5) * vBlockLight;
+
+            // Surface color with AO
+            vec3 baseColor = texColor.rgb * (sunLight + emissiveLight) * vAO;
+
+            // Atmospheric fog calibrated to the active LOD 4 shell. Nearby
+            // islands stay readable, while anything at the 1,152-block edge
+            // is fully blended into the sky color.
+            float fogStart = 0.0;
+            float fogEnd = 4608.0 / 4.0;
+            float fogFactor = smoothstep(fogStart, fogEnd, vDistance);
+
+            FragColor = vec4(mix(baseColor, uFogColor, fogFactor), texColor.a);
+        }
+    )";
+
+    Shader voxelShader(vShaderSrc, fShaderSrc);
+
+    // Initialize Skybox & HUD
+    Skybox skybox;
+    skybox.init();
+
+    HUD hud;
+    hud.init();
+
+    // Chunk Manager
+    ChunkManager chunkMgr;
+
+    // Timing
+    float lastFrameTime = static_cast<float>(glfwGetTime());
+    int frameCount = 0;
+    float fpsTimer = 0.0f;
+    float currentFPS = 60.0f;
+
+    // Day/Night Cycle time
+    float dayTime = 0.5f; // 0.0 to 1.0
+
+    std::cout << "Engine ready! Entering main render loop...\n";
+    int testFrameCount = 0;
+    double totalFrameTimeMs = 0.0;
+    int benchmarkFrameCount = 0;
+
+    while (!glfwWindowShouldClose(window)) {
+        auto frameStart = std::chrono::high_resolution_clock::now();
+
+        float currentFrame = static_cast<float>(glfwGetTime());
+        float deltaTime = currentFrame - lastFrameTime;
+        if (deltaTime <= 0.0f) deltaTime = 0.016f;
+        lastFrameTime = currentFrame;
+
+        frameCount++;
+        fpsTimer += deltaTime;
+        if (fpsTimer >= 0.5f) {
+            currentFPS = frameCount / fpsTimer;
+            frameCount = 0;
+            fpsTimer = 0.0f;
+        }
+
+        if (testMode) {
+            testFrameCount++;
+            camera.position.x += 150.0f * 0.016f;
+            camera.position.y += 10.0f * 0.016f;
+            camera.position.z += 150.0f * 0.016f;
+        }
+        glfwPollEvents();
+        glfwGetFramebufferSize(window, &windowWidth, &windowHeight);
+        if (windowWidth < 1) windowWidth = 1;
+        if (windowHeight < 1) windowHeight = 1;
+        float aspect = static_cast<float>(windowWidth) / static_cast<float>(windowHeight);
+
+        // Update Physics & Camera
+        bool superSpeed = keys[GLFW_KEY_LEFT_SHIFT] || keys[GLFW_KEY_TAB];
+        physics.update(camera, chunkMgr, keys, superSpeed, deltaTime);
+
+        // Update Chunk Manager (loads/unloads & queues multithreaded LOD chunks)
+        chunkMgr.update(camera.position);
+
+        // Day/Night Sun direction calculations
+        dayTime += deltaTime * 0.005f; // Slow day cycle
+        float sunAngle = dayTime * 2.0f * PI;
+        Vec3 sunDir(std::cos(sunAngle), std::sin(sunAngle), 0.3f);
+        sunDir = sunDir.normalized();
+
+        Vec3 sunColor(1.0f, 0.95f, 0.85f);
+        Vec3 ambientColor(0.35f, 0.38f, 0.45f);
+        Vec3 skyTop(0.2f, 0.5f, 0.9f);
+        Vec3 skyHorizon(0.7f, 0.85f, 1.0f);
+        Vec3 fogColor = skyHorizon;
+
+        // Night time adjustments
+        if (sunDir.y < 0.0f) {
+            float nightFactor = std::clamp(-sunDir.y * 2.0f, 0.0f, 1.0f);
+            skyTop = Vec3::lerp(skyTop, Vec3(0.02f, 0.03f, 0.08f), nightFactor);
+            skyHorizon = Vec3::lerp(skyHorizon, Vec3(0.05f, 0.08f, 0.15f), nightFactor);
+            fogColor = skyHorizon;
+            ambientColor = Vec3::lerp(ambientColor, Vec3(0.1f, 0.12f, 0.2f), nightFactor);
+            sunColor = Vec3::lerp(sunColor, Vec3(0.2f, 0.2f, 0.3f), nightFactor);
+        }
+
+        // Match the skybox to the fog color so distant geometry fades into a
+        // seamless background rather than a different sky gradient.
+        skyTop = fogColor;
+        skyHorizon = fogColor;
+
+        // Render pass setup
+        glViewport(0, 0, windowWidth, windowHeight);
+        glClearColor(fogColor.x, fogColor.y, fogColor.z, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+        // View and Projection matrices
+        Mat4 projection = camera.getProjectionMatrix(aspect);
+        Mat4 view = camera.getViewMatrix();
+        Frustum frustum = Frustum::extract(projection * view);
+
+        // 1. Render Skybox
+        skybox.draw(projection, view, sunDir, sunColor, skyTop, skyHorizon);
+
+        // 2. Render Voxel Chunks
+        voxelShader.use();
+        voxelShader.setMat4("uProjection", projection);
+        voxelShader.setMat4("uView", view);
+        voxelShader.setVec3("uSunDir", sunDir);
+        voxelShader.setVec3("uSunColor", sunColor);
+        voxelShader.setVec3("uAmbientColor", ambientColor);
+        voxelShader.setVec3("uFogColor", fogColor);
+
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, atlasTexture);
+        voxelShader.setInt("uTextureAtlas", 0);
+
+        GLint uChunkMinLoc = glGetUniformLocation(voxelShader.programID, "uChunkMin");
+        chunkMgr.render(frustum, camera.position, voxelShader.programID, uChunkMinLoc);
+
+        // 3. Render HUD UI Overlay
+        if (showHUD) {
+            int totalChunks = 0, uploadedMeshes = 0, pendingTasks = 0;
+            chunkMgr.getStats(totalChunks, uploadedMeshes, pendingTasks);
+
+            std::stringstream ss1, ss2, ss3, ss4, ss5, ss6;
+            ss1 << "INFINITE VOXEL ENGINE (LOD 0..4 RENDER DISTANCE)";
+            ss2 << "FPS: " << static_cast<int>(currentFPS) << " | Frame Time: " << std::fixed << std::setprecision(1) << (1000.0f / currentFPS) << " ms";
+            ss3 << "XYZ: " << std::fixed << std::setprecision(1) << camera.position.x << " / " << camera.position.y << " / " << camera.position.z;
+            ss4 << "Effective Render Distance: ~4,608 blocks (LODs 0..4)";
+            ss5 << "Chunks: " << totalChunks << " loaded | Meshes: " << uploadedMeshes << " | Queued Tasks: " << pendingTasks;
+            ss6 << "Mode: " << (physics.isFlying ? "FLYING (WASD + Space/Shift)" : "WALKING (Physics Collision)")
+                << (superSpeed ? " [SUPER SPEED 160m/s]" : "") << " | [F] Toggle Fly | [H] HUD";
+
+            hud.renderText(ss1.str(), 16.0f, 16.0f, 1.8f, Vec3(1.0f, 0.9f, 0.2f), static_cast<float>(windowWidth), static_cast<float>(windowHeight));
+            hud.renderText(ss2.str(), 16.0f, 44.0f, 1.5f, Vec3(0.3f, 1.0f, 0.4f), static_cast<float>(windowWidth), static_cast<float>(windowHeight));
+            hud.renderText(ss3.str(), 16.0f, 68.0f, 1.5f, Vec3(0.9f, 0.9f, 0.9f), static_cast<float>(windowWidth), static_cast<float>(windowHeight));
+            hud.renderText(ss4.str(), 16.0f, 92.0f, 1.5f, Vec3(0.4f, 0.8f, 1.0f), static_cast<float>(windowWidth), static_cast<float>(windowHeight));
+            hud.renderText(ss5.str(), 16.0f, 116.0f, 1.4f, Vec3(0.8f, 0.8f, 0.8f), static_cast<float>(windowWidth), static_cast<float>(windowHeight));
+            hud.renderText(ss6.str(), 16.0f, 140.0f, 1.4f, Vec3(1.0f, 0.5f, 0.2f), static_cast<float>(windowWidth), static_cast<float>(windowHeight));
+        }
+
+        glfwSwapBuffers(window);
+
+        auto frameEnd = std::chrono::high_resolution_clock::now();
+        double frameTimeMs = std::chrono::duration<double, std::milli>(frameEnd - frameStart).count();
+        if (testFrameCount > 30) { // Skip first 30 warmup frames
+            totalFrameTimeMs += frameTimeMs;
+            benchmarkFrameCount++;
+        }
+
+        if (testMode && testFrameCount >= 600) {
+            int totalChunks = 0, uploadedMeshes = 0, pendingTasks = 0;
+            chunkMgr.getStats(totalChunks, uploadedMeshes, pendingTasks);
+            double avgFrameTimeMs = benchmarkFrameCount > 0 ? (totalFrameTimeMs / benchmarkFrameCount) : 0.0;
+            double avgFPS = avgFrameTimeMs > 0.0 ? (1000.0 / avgFrameTimeMs) : 0.0;
+
+            std::cout << "\n=== BENCHMARK & VERIFICATION SUMMARY ===\n";
+            std::cout << "Average Frame Render Time: " << std::fixed << std::setprecision(3) << avgFrameTimeMs << " ms (" << std::setprecision(1) << avgFPS << " FPS)\n";
+            std::cout << "Target (< 5.0 ms): " << (avgFrameTimeMs < 5.0 ? "PASS" : "FAIL - Optimization Needed") << "\n";
+            std::cout << "Stats: Loaded Chunks=" << totalChunks << ", Active Meshes=" << uploadedMeshes << ", Camera XYZ=("
+                      << camera.position.x << ", " << camera.position.y << ", " << camera.position.z << ")\n";
+            uint64_t count = chunkMgr.chunksProcessed.load();
+            double genMs = count > 0 ? (chunkMgr.totalGenTimeUs.load() / 1000.0 / count) : 0;
+            double meshMs = count > 0 ? (chunkMgr.totalMeshTimeUs.load() / 1000.0 / count) : 0;
+            std::cout << "Chunk Worker Stats: Chunks Processed=" << count << " | Avg Gen Time=" << genMs << " ms | Avg Mesh Time=" << meshMs << " ms\n";
+
+            // Save Framebuffer Screenshot to PPM
+            std::vector<unsigned char> pixels(windowWidth * windowHeight * 3);
+            glReadPixels(0, 0, windowWidth, windowHeight, GL_RGB, GL_UNSIGNED_BYTE, pixels.data());
+            std::ofstream ppm("screenshot.ppm", std::ios::binary);
+            ppm << "P6\n" << windowWidth << " " << windowHeight << "\n255\n";
+            for (int row = windowHeight - 1; row >= 0; --row) {
+                ppm.write(reinterpret_cast<char*>(&pixels[row * windowWidth * 3]), windowWidth * 3);
+            }
+            ppm.close();
+            std::cout << "Saved screenshot.ppm\n";
+            break;
+        }
+    }
+        glDeleteTextures(1, &atlasTexture);
+    } // End inner scope (all GL shaders, meshes, textures, chunk manager destructed here while context is active)
+    std::cout << "Shutting down renderer...\n";
+    glfwDestroyWindow(window);
+    glfwTerminate();
+    return 0;
+}

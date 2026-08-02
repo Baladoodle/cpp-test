@@ -1,0 +1,11 @@
+# ninja log v7
+2	259	1785693448575417458	CMakeFiles/InfiniteVoxelEngine.dir/src/SimplexNoise.cpp.o	a53940fdef666fc0
+1	87	1785697607305486104	build.ninja	57ab46b443df906f
+1	87	1785697607304486073	/home/baladoodle/Baladoodle/Programming/Minecraft/Infinite/build/cmake_install.cmake	57ab46b443df906f
+1	3398	1785697593978070444	CMakeFiles/InfiniteVoxelEngine.dir/src/Main.cpp.o	e397b4567a618358
+3398	3459	1785697597375177038	InfiniteVoxelEngine	a18b766136cf4fbb
+1	4	1785693448567455244	clean	7adf74806070bde8
+2	5435	1785697618679835541	CMakeFiles/InfiniteVoxelEngine.dir/src/Main.cpp.o	e397b4567a618358
+5435	5558	1785697624113000765	InfiniteVoxelEngine	a18b766136cf4fbb
+2	5554	1785697640684498083	CMakeFiles/InfiniteVoxelEngine.dir/src/Main.cpp.o	e397b4567a618358
+5554	5656	1785697646236662518	InfiniteVoxelEngine	a18b766136cf4fbb
