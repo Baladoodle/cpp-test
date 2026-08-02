@@ -616,6 +616,94 @@ public:
         return std::clamp(0.5f + broad * 0.35f + local * 0.15f, 0.0f, 1.0f);
     }
 
+    // Continuous habitat quality for grass. There is no hard patch boundary:
+    // the value is mapped directly to the chance of placing a blade.
+    static float getTallGrassHabitatNoise(int64_t wx, int64_t wz) {
+        return SimplexNoise::octave3D(
+            static_cast<float>(wx + 17321) * 0.012f,
+            0.0f,
+            static_cast<float>(wz - 9511) * 0.012f,
+            3,
+            0.5f,
+            2.0f
+        ) * 0.5f + 0.5f;
+    }
+
+    // Stable per-cell variation turns the continuous chance into actual
+    // deterministic placements without adding world-state or save data.
+    static float getTallGrassCellNoise(int64_t wx, int64_t wz) {
+        uint64_t hash = static_cast<uint64_t>(wx) * 0x9E3779B185EBCA87ULL ^
+            static_cast<uint64_t>(wz) * 0xC2B2AE3D27D4EB4FULL;
+        hash ^= hash >> 30;
+        hash *= 0xBF58476D1CE4E5B9ULL;
+        hash ^= hash >> 27;
+        hash *= 0x94D049BB133111EBULL;
+        hash ^= hash >> 31;
+        return static_cast<float>((hash >> 11) & 0x1FFFFFFFFFFFFFULL) /
+            9007199254740992.0f;
+    }
+
+    // Keep zone boundaries deterministic in world space, but break up the
+    // exact cutoff with a low-frequency field. The broad signal controls
+    // where a zone lives; the transition noise only affects its edge, so
+    // interiors remain stable and recognizable.
+    static float getDesertBiomeNoise(int64_t wx, int64_t wz) {
+        return SimplexNoise::eval3D(
+            static_cast<float>(wx) * 0.001f,
+            0.0f,
+            static_cast<float>(wz) * 0.001f
+        );
+    }
+
+    static bool isDesertZone(int64_t wx, int64_t wz) {
+        constexpr float threshold = 0.4f;
+        constexpr float transitionHalfWidth = 0.12f;
+        float biomeNoise = getDesertBiomeNoise(wx, wz);
+
+        if (biomeNoise <= threshold - transitionHalfWidth) return false;
+        if (biomeNoise >= threshold + transitionHalfWidth) return true;
+
+        float transitionNoise = SimplexNoise::octave3D(
+            static_cast<float>(wx + 3749) * 0.018f,
+            0.0f,
+            static_cast<float>(wz - 9277) * 0.018f,
+            3,
+            0.5f,
+            2.0f
+        ) * 0.5f + 0.5f;
+        float desertBlend = (biomeNoise - (threshold - transitionHalfWidth)) /
+            (2.0f * transitionHalfWidth);
+        return transitionNoise < desertBlend;
+    }
+
+    static bool isHighSkyZone(int64_t wx, int64_t wy, int64_t wz) {
+        constexpr float boundaryY = 300.0f;
+        constexpr float transitionHalfWidth = 8.0f;
+
+        // Wobble the nominal altitude boundary in X/Z first. This gives the
+        // zone a large readable shape instead of a perfectly level slice.
+        float boundaryNoise = SimplexNoise::eval3D(
+            static_cast<float>(wx - 6103) * 0.012f,
+            0.0f,
+            static_cast<float>(wz + 1187) * 0.012f
+        );
+        float boundary = boundaryY + boundaryNoise * 18.0f;
+        float distance = static_cast<float>(wy) - boundary;
+
+        if (distance <= -transitionHalfWidth) return false;
+        if (distance >= transitionHalfWidth) return true;
+
+        // Within the narrow edge band, select patches from a second field so
+        // the boundary is ragged and interlocking instead of one voxel-wide.
+        float transitionNoise = SimplexNoise::eval3D(
+            static_cast<float>(wx + 14783) * 0.038f,
+            static_cast<float>(wy - 3251) * 0.032f,
+            static_cast<float>(wz - 4819) * 0.038f
+        ) * 0.5f + 0.5f;
+        float skyBlend = distance / (2.0f * transitionHalfWidth) + 0.5f;
+        return transitionNoise < skyBlend;
+    }
+
     // One jittered site per small world cell gives forests an even, natural
     // distribution without the clumping caused by local-noise maxima.
     static bool isTreeSite(int64_t wx, int64_t wz) {
@@ -650,15 +738,16 @@ public:
         // Check block directly above to determine surface
         float aboveDensity = getDensity(wx, wy + scale, wz, scale);
 
-        // High sky island biome (> 300 height)
-        if (wy > 300) {
+        // High sky island biome with a noisy spatial transition around its
+        // nominal altitude boundary.
+        if (isHighSkyZone(wx, wy, wz)) {
             if (aboveDensity <= 0.0f) return BLOCK_SKY_QUARTZ;
             return BLOCK_STONE;
         }
 
-        // Desert floating island biome (determined by regional 2D noise)
-        float biomeNoise = SimplexNoise::eval3D(wx * 0.001f, 0.0f, wz * 0.001f);
-        bool isDesert = biomeNoise > 0.4f;
+        // Desert floating island biome with a noisy edge between regional
+        // habitats instead of a single hard contour.
+        bool isDesert = isDesertZone(wx, wz);
 
         if (aboveDensity <= 0.0f) {
             // Surface block
@@ -694,16 +783,12 @@ public:
     ) {
         if (density <= 0.0f) return BLOCK_AIR;
 
-        if (wy > 300) {
+        if (isHighSkyZone(wx, wy, wz)) {
             if (aboveDensity <= 0.0f) return BLOCK_SKY_QUARTZ;
             return BLOCK_STONE;
         }
 
-        bool isDesert = SimplexNoise::eval3D(
-            static_cast<float>(wx) * 0.001f,
-            0.0f,
-            static_cast<float>(wz) * 0.001f
-        ) > 0.4f;
+        bool isDesert = isDesertZone(wx, wz);
 
         if (aboveDensity <= 0.0f) {
             if (isDesert) return BLOCK_SAND;

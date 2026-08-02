@@ -15,6 +15,7 @@ struct VoxelVertex {
     float ao;             // Ambient Occlusion (0.2 - 1.0)
     float blockLight;     // Emissive Block Light (0.0 - 1.0)
     float lodLevel;       // LOD level for shader fog/fade
+    float windWeight;     // 0 at the ground, 1 at the tip of wind-animated plants
 };
 
 class Mesh {
@@ -119,6 +120,10 @@ public:
         // Attribute 6: LOD Level
         glEnableVertexAttribArray(6);
         glVertexAttribPointer(6, 1, GL_FLOAT, GL_FALSE, sizeof(VoxelVertex), (void*)offsetof(VoxelVertex, lodLevel));
+
+        // Attribute 7: Wind weight
+        glEnableVertexAttribArray(7);
+        glVertexAttribPointer(7, 1, GL_FLOAT, GL_FALSE, sizeof(VoxelVertex), (void*)offsetof(VoxelVertex, windWeight));
 
         glBindVertexArray(0);
         uploaded = true;

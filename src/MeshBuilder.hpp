@@ -206,6 +206,49 @@ public:
                     }
                 }
             }
+
+            // Lightweight vegetation pass. Tall grass is deliberately kept
+            // at LOD 0: it is visual detail, not part of the terrain shell.
+            // The surface lookup is from before the lake edits, so checking
+            // the current block and its air-filled cell also keeps plants out
+            // of ponds and tree canopies.
+            for (int z = 0; z < CHUNK_SIZE; ++z) {
+                for (int x = 0; x < CHUNK_SIZE; ++x) {
+                    int surfaceY = surfaceAt(x, z);
+                    if (surfaceY < 0 || surfaceY + 1 >= CHUNK_SIZE) continue;
+                    if (chunk.getBlock(x, surfaceY, z) != BLOCK_GRASS ||
+                        chunk.getBlock(x, surfaceY + 1, z) != BLOCK_AIR) {
+                        continue;
+                    }
+
+                    int64_t wx = wmx + x;
+                    int64_t wz = wmz + z;
+                    if (WorldGen::getLakeNoise(wx, wz) >= 0.72f) continue;
+
+                    // Map habitat quality directly to placement chance:
+                    // poor areas still get ~8% coverage, while the best areas
+                    // approach ~80% without ever becoming guaranteed carpets.
+                    float grassChance = 0.08f +
+                        WorldGen::getTallGrassHabitatNoise(wx, wz) * 0.72f;
+                    if (WorldGen::getTallGrassCellNoise(wx, wz) > grassChance) {
+                        continue;
+                    }
+                    chunk.setBlock(x, surfaceY + 1, z, BLOCK_TALL_GRASS);
+
+                    // Most grass stays one block high. A second independent
+                    // deterministic roll makes roughly one in ten plants a
+                    // rare two-block variant without changing the habitat
+                    // coverage itself.
+                    bool rareTwoTall = WorldGen::getTallGrassCellNoise(
+                        wx + 104729,
+                        wz - 7919
+                    ) < 0.10f;
+                    if (rareTwoTall && surfaceY + 2 < CHUNK_SIZE &&
+                        chunk.getBlock(x, surfaceY + 2, z) == BLOCK_AIR) {
+                        chunk.setBlock(x, surfaceY + 2, z, BLOCK_TALL_GRASS_TOP);
+                    }
+                }
+            }
         }
         // Recompute after lakes/flora have been applied.
         hasSolid = false;
@@ -309,6 +352,72 @@ public:
             {0.0f, 0.0f}, {0.0f, 1.0f}, {1.0f, 1.0f}, {1.0f, 0.0f}
         };
 
+        // Append a crossed pair of alpha-tested quads. Both windings are
+        // emitted because the regular voxel pass uses back-face culling.
+        auto appendGrassQuad = [&](uint8_t grassTexTile, float heightScale,
+                                   float windBase, float windTip,
+                                   float blockRelX, float blockRelY, float blockRelZ,
+                                   const Vec3& bottomA, const Vec3& bottomB, const Vec3& normal) {
+            const uint8_t texTileID = grassTexTile;
+            const float tileU0 = (texTileID % 16) / 16.0f;
+            const float tileV0 = (texTileID / 16) / 16.0f;
+            const float tileSize = 1.0f / 16.0f;
+            const float halfTexel = 0.5f / 256.0f;
+            const float safeTileSize = tileSize - halfTexel * 2.0f;
+            const Vec3 up(0.0f, fScale * heightScale, 0.0f);
+            const Vec3 positions[4] = {
+                bottomA, bottomA + up, bottomB + up, bottomB
+            };
+            const Vec3 reversePositions[4] = {
+                bottomA, bottomB, bottomB + up, bottomA + up
+            };
+            const float windWeights[4] = { windBase, windTip, windTip, windBase };
+            const float uv[4][2] = {
+                {0.0f, 1.0f}, {0.0f, 0.0f}, {1.0f, 0.0f}, {1.0f, 1.0f}
+            };
+            const float reverseUV[4][2] = {
+                {0.0f, 1.0f}, {1.0f, 1.0f}, {1.0f, 0.0f}, {0.0f, 0.0f}
+            };
+
+            auto appendWinding = [&](const Vec3* quad, const Vec3& quadNormal,
+                                     const float quadUV[4][2],
+                                     const float quadWindWeights[4]) {
+                uint32_t baseIdx = static_cast<uint32_t>(chunk.stagedVertices.size());
+                for (int c = 0; c < 4; ++c) {
+                    VoxelVertex vert{};
+                    vert.x = blockRelX + quad[c].x * fScale;
+                    vert.y = blockRelY + quad[c].y;
+                    vert.z = blockRelZ + quad[c].z * fScale;
+                    vert.nx = quadNormal.x;
+                    vert.ny = quadNormal.y;
+                    vert.nz = quadNormal.z;
+                    // Keep grass samples inside the tile by half a texel so
+                    // atlas boundaries can never contribute neighbor colors.
+                    vert.u = tileU0 + halfTexel + quadUV[c][0] * safeTileSize;
+                    vert.v = tileV0 + halfTexel + quadUV[c][1] * safeTileSize;
+                    vert.texIndex = static_cast<float>(texTileID);
+                    vert.ao = 1.0f;
+                    vert.blockLight = 0.0f;
+                    vert.lodLevel = lodLvl;
+                    vert.windWeight = quadWindWeights[c];
+                    chunk.stagedVertices.push_back(vert);
+                }
+
+                chunk.stagedIndices.push_back(baseIdx + 0);
+                chunk.stagedIndices.push_back(baseIdx + 1);
+                chunk.stagedIndices.push_back(baseIdx + 2);
+                chunk.stagedIndices.push_back(baseIdx + 0);
+                chunk.stagedIndices.push_back(baseIdx + 2);
+                chunk.stagedIndices.push_back(baseIdx + 3);
+            };
+
+            const float reverseWindWeights[4] = {
+                windBase, windBase, windTip, windTip
+            };
+            appendWinding(positions, normal, uv, windWeights);
+            appendWinding(reversePositions, -normal, reverseUV, reverseWindWeights);
+        };
+
         for (int z = 0; z < CHUNK_SIZE; ++z) {
             for (int y = 0; y < CHUNK_SIZE; ++y) {
                 for (int x = 0; x < CHUNK_SIZE; ++x) {
@@ -321,6 +430,67 @@ public:
                     float relY = static_cast<float>(y * scale);
                     float relZ = static_cast<float>(z * scale);
 
+                    uint8_t leafVariant = 0;
+                    if (isAnyLeaf(blockType)) {
+                        uint64_t leafHash =
+                            static_cast<uint64_t>(wmx + x * scale) * 0x9E3779B185EBCA87ULL ^
+                            static_cast<uint64_t>(wmy + y * scale) * 0xC2B2AE3D27D4EB4FULL ^
+                            static_cast<uint64_t>(wmz + z * scale) * 0xBF58476D1CE4E5B9ULL;
+                        leafHash ^= leafHash >> 30;
+                        leafHash *= 0x94D049BB133111EBULL;
+                        leafHash ^= leafHash >> 27;
+                        leafVariant = static_cast<uint8_t>(leafHash % 6ULL);
+                    }
+
+                    if (blockType == BLOCK_TALL_GRASS || blockType == BLOCK_TALL_GRASS_TOP) {
+                        // Stable per-cell variation keeps neighboring chunks
+                        // seamless while preventing a repeated stamp pattern.
+                        uint64_t grassHash = static_cast<uint64_t>(wmx + x * scale) *
+                            0x9E3779B185EBCA87ULL ^
+                            static_cast<uint64_t>(wmz + z * scale) *
+                            0xC2B2AE3D27D4EB4FULL;
+                        grassHash ^= grassHash >> 30;
+                        grassHash *= 0xBF58476D1CE4E5B9ULL;
+                        grassHash ^= grassHash >> 27;
+                        bool upperHalf = blockType == BLOCK_TALL_GRASS_TOP;
+                        bool rareTwoTallLower = blockType == BLOCK_TALL_GRASS &&
+                            chunk.getBlock(x, y + 1, z) == BLOCK_TALL_GRASS_TOP;
+                        bool twoTallPlant = rareTwoTallLower ||
+                            (upperHalf && y > 0 &&
+                                chunk.getBlock(x, y - 1, z) == BLOCK_TALL_GRASS);
+                        // There are three sprite variants, but the yellow-tip
+                        // variant is deliberately uncommon: 1/15 for normal
+                        // grass instead of the old 1/3. Two-tall plants are
+                        // restricted to the two green variants entirely.
+                        uint8_t grassVariant = static_cast<uint8_t>((grassHash >> 8) & 1ULL);
+                        if (!twoTallPlant && grassHash % 15ULL == 0ULL) {
+                            grassVariant = 2;
+                        }
+                        uint8_t grassTexTile = upperHalf
+                            ? static_cast<uint8_t>(32 + grassVariant)
+                            : static_cast<uint8_t>((rareTwoTallLower ? 35 : 29) + grassVariant);
+                        float heightScale = 1.0f;
+                        float inset = 0.08f +
+                            static_cast<float>((grassHash >> 16) & 0x1f) / 31.0f * 0.06f;
+                        float baseY = relY - 0.02f;
+                        float windBase = upperHalf ? 0.5f : 0.0f;
+                        float windTip = upperHalf ? 1.0f :
+                            (rareTwoTallLower ? 0.5f : 1.0f);
+                        appendGrassQuad(
+                            grassTexTile, heightScale, windBase, windTip, relX, baseY, relZ,
+                            Vec3(inset, 0.0f, inset),
+                            Vec3(1.0f - inset, 0.0f, 1.0f - inset),
+                            Vec3(1.0f, 0.0f, -1.0f).normalized()
+                        );
+                        appendGrassQuad(
+                            grassTexTile, heightScale, windBase, windTip, relX, baseY, relZ,
+                            Vec3(inset, 0.0f, 1.0f - inset),
+                            Vec3(1.0f - inset, 0.0f, inset),
+                            Vec3(-1.0f, 0.0f, -1.0f).normalized()
+                        );
+                        continue;
+                    }
+
                     for (int f = 0; f < 6; ++f) {
                         int nx = x + faceOffsetDirs[f][0];
                         int ny = y + faceOffsetDirs[f][1];
@@ -330,6 +500,9 @@ public:
                         if (isSolidBlock(nx, ny, nz)) continue;
 
                         uint8_t texTileID = getBlockTextureIndex(blockType, f);
+                        if (isAnyLeaf(blockType)) {
+                            texTileID = getLeafTextureIndex(blockType, leafVariant);
+                        }
                         float tileU0 = (texTileID % 16) / 16.0f;
                         float tileV0 = (texTileID / 16) / 16.0f;
                         float tileSize = 1.0f / 16.0f;
@@ -372,6 +545,7 @@ public:
                             vert.ao = ao[c];
                             vert.blockLight = blockEmissive;
                             vert.lodLevel = lodLvl;
+                            vert.windWeight = 0.0f;
 
                             chunk.stagedVertices.push_back(vert);
                         }

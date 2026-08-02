@@ -123,10 +123,13 @@ int main(int argc, char** argv) {
         layout (location = 4) in float aAO;
         layout (location = 5) in float aBlockLight;
         layout (location = 6) in float aLodLevel;
+        layout (location = 7) in float aWindWeight;
 
         out vec3 vNormal;
         out vec2 vTexCoord;
         out float vTexIndex;
+        flat out int vCutoutTile;
+        out vec2 vCutoutLocalUV;
         out float vAO;
         out float vBlockLight;
         out float vDistance;
@@ -135,14 +138,32 @@ int main(int argc, char** argv) {
         uniform mat4 uProjection;
         uniform mat4 uView;
         uniform vec3 uChunkMin; // Chunk min relative to camera
+        uniform vec3 uCameraWorldPos;
+        uniform float uTime;
 
         void main() {
             vec3 relPos = uChunkMin + aPos;
+            vec3 worldPos = uCameraWorldPos + relPos;
+
+            // Subtle height-weighted motion for grass blades. The world-space
+            // phase keeps adjacent chunks moving continuously across seams.
+            float phase = uTime * 1.7 + dot(worldPos.xz, vec2(0.075, 0.055));
+            vec2 wind = vec2(
+                sin(phase) * 0.055 + sin(phase * 0.47 + worldPos.z * 0.08) * 0.018,
+                cos(phase * 0.83) * 0.035 + cos(phase * 0.31 + worldPos.x * 0.06) * 0.012
+            );
+            relPos.xz += wind * aWindWeight;
             gl_Position = uProjection * uView * vec4(relPos, 1.0);
 
             vNormal = aNormal;
             vTexCoord = aTexCoord;
             vTexIndex = aTexIndex;
+            vCutoutTile = int(aTexIndex + 0.5);
+            vec2 atlasTile = vec2(
+                mod(aTexIndex, 16.0),
+                floor(aTexIndex / 16.0)
+            );
+            vCutoutLocalUV = aTexCoord * 16.0 - atlasTile;
             vAO = aAO;
             vBlockLight = aBlockLight;
             vDistance = length(relPos);
@@ -155,6 +176,8 @@ int main(int argc, char** argv) {
         in vec3 vNormal;
         in vec2 vTexCoord;
         in float vTexIndex;
+        flat in int vCutoutTile;
+        in vec2 vCutoutLocalUV;
         in float vAO;
         in float vBlockLight;
         in float vDistance;
@@ -169,7 +192,27 @@ int main(int argc, char** argv) {
         uniform vec3 uFogColor;
 
         void main() {
-            vec4 texColor = texture(uTextureAtlas, vTexCoord);
+            vec4 texColor;
+            bool isLeafTile = vCutoutTile == 7 || vCutoutTile == 13 ||
+                vCutoutTile == 16 || vCutoutTile == 19 ||
+                vCutoutTile == 22 || vCutoutTile == 23 ||
+                vCutoutTile == 26 || vCutoutTile == 27 ||
+                (vCutoutTile >= 38 && vCutoutTile <= 57);
+            bool isGrassTile = vCutoutTile >= 29 && vCutoutTile <= 37;
+            if (isLeafTile || isGrassTile) {
+                // Cutout foliage is authored as pixel art. Read the exact
+                // atlas texel so transparent edges cannot pull color from a
+                // neighboring tile.
+                int tileID = vCutoutTile;
+                ivec2 tileBase = ivec2((tileID % 16) * 16, (tileID / 16) * 16);
+                ivec2 localPixel = ivec2(
+                    clamp(int(vCutoutLocalUV.x * 16.0), 0, 15),
+                    clamp(int(vCutoutLocalUV.y * 16.0), 0, 15)
+                );
+                texColor = texelFetch(uTextureAtlas, tileBase + localPixel, 0);
+            } else {
+                texColor = texture(uTextureAtlas, vTexCoord);
+            }
             if (texColor.a < 0.1) discard;
 
             // Directional sun shading
@@ -302,6 +345,8 @@ int main(int argc, char** argv) {
         voxelShader.setVec3("uSunColor", sunColor);
         voxelShader.setVec3("uAmbientColor", ambientColor);
         voxelShader.setVec3("uFogColor", fogColor);
+        voxelShader.setVec3("uCameraWorldPos", camera.position);
+        voxelShader.setFloat("uTime", currentFrame);
 
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, atlasTexture);

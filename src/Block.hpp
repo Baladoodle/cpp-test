@@ -17,6 +17,8 @@ enum BlockType : uint8_t {
     BLOCK_LEAVES_LIGHT = 10,
     BLOCK_LEAVES_DARK = 11,
     BLOCK_LEAVES_WARM = 12,
+    BLOCK_TALL_GRASS = 13,
+    BLOCK_TALL_GRASS_TOP = 14,
     BLOCK_COUNT
 };
 
@@ -54,7 +56,9 @@ inline const BlockInfo& getBlockInfo(uint8_t type) {
         { "Water",          false, true,  0, 10, 10, 10 },
         { "Light Oak Leaves",true,  true,  0, 13, 13, 13 },
         { "Dark Oak Leaves", true,  true,  0, 19, 19, 19 },
-        { "Warm Oak Leaves", true,  true,  0, 23, 23, 23 }
+        { "Warm Oak Leaves", true,  true,  0, 23, 23, 23 },
+        { "Tall Grass",      false, true,  0, 29, 29, 29 },
+        { "Tall Grass Top",  false, true,  0, 32, 32, 32 }
     };
     if (type >= BLOCK_COUNT) return infos[0];
     return infos[type];
@@ -70,6 +74,24 @@ inline uint8_t getBlockTextureIndex(uint8_t blockType, uint8_t direction) {
     if (direction == DIR_POS_Y) return info.topTex;
     if (direction == DIR_NEG_Y) return info.bottomTex;
     return info.sideTex;
+}
+
+// Dummy leaf art uses several masks per palette. Keep the mapping here so
+// replacing the procedural atlas with real assets later does not touch mesh
+// generation or worldgen.
+inline uint8_t getLeafTextureIndex(uint8_t blockType, uint8_t variant) {
+    static constexpr uint8_t leafTiles[4][6] = {
+        { 7, 38, 39, 40, 41, 42 },
+        { 13, 43, 44, 45, 46, 47 },
+        { 19, 48, 49, 50, 51, 52 },
+        { 23, 53, 54, 55, 56, 57 }
+    };
+
+    int palette = 0;
+    if (blockType == BLOCK_LEAVES_LIGHT) palette = 1;
+    else if (blockType == BLOCK_LEAVES_DARK) palette = 2;
+    else if (blockType == BLOCK_LEAVES_WARM) palette = 3;
+    return leafTiles[palette][variant % 6];
 }
 
 #endif // BLOCK_HPP

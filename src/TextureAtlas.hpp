@@ -29,13 +29,68 @@ public:
 
         // Pseudo-random helper
         auto randNoise = [](int x, int y, int seed) -> float {
-            int n = x + y * 57 + seed * 131;
+            uint32_t n = static_cast<uint32_t>(x) +
+                static_cast<uint32_t>(y) * 57u +
+                static_cast<uint32_t>(seed) * 131u;
             n = (n << 13) ^ n;
-            return (1.0f - ((n * (n * n * 15731 + 789221) + 1376312589) & 0x7fffffff) / 1073741824.0f);
+            uint32_t value = n * (n * n * 15731u + 789221u) + 1376312589u;
+            return 1.0f - static_cast<float>(value & 0x7fffffffu) / 1073741824.0f;
+        };
+
+        // Dummy pixel masks for now. They are deliberately hand-authored as
+        // clusters instead of radial shapes so the canopy reads as foliage at
+        // close range. Real leaf art can replace these atlas tiles later.
+        const char* leafMasks[6][16] = {
+            {
+                "......##........", "....######......", "...########.....", "..##########....",
+                ".############...", "##############..", "##############..", "###############.",
+                "##############..", ".############...", "..###########...", "...#########....",
+                "....#######.....", ".....#####......", "......###.......", "................"
+            },
+            {
+                ".....###........", "...#######......", "..#########.....", ".#####.#####....",
+                ".############...", "##############..", "##############..", "###############.",
+                ".#############..", "..#####.#####...", "...##########...", "....########....",
+                ".....######.....", "......####......", "................", "................"
+            },
+            {
+                ".......##.......", ".....#####......", "...########.....", "..#####.###.....",
+                ".############...", "###########.##..", "##############..", "###############.",
+                "##############..", "..###########...", "...###.######...", "....########....",
+                ".....######.....", "......####......", ".......##.......", "................"
+            },
+            {
+                "....####........", "..########......", ".##########.....", ".####.######....",
+                "#############...", "##############..", "######.#######..", "###############.",
+                "##############..", ".######.######..", "..###########...", "...##########...",
+                "....#######.....", ".....#####......", "......###.......", "................"
+            },
+            {
+                "......###.......", "....#######.....", "..##########....", ".######.#####...",
+                "#############...", "###########.##..", "##############..", "###############.",
+                "##############..", "..###########...", "...##########...", "....#####.##....",
+                ".....######.....", "......####......", "................", "................"
+            },
+            {
+                ".....####.......", "...########.....", "..##########....", ".#######.###....",
+                "#############...", "##############..", "########.######.", "###############.",
+                "##############..", ".###########....", "..######.####...", "...##########...",
+                "....#######.....", ".....#####......", "......###.......", "................"
+            }
+        };
+
+        // Leaves are rendered as alpha-tested cutouts rather than blended
+        // quads. This keeps depth ordering deterministic in dense trees.
+        auto leafMask = [&](int px, int py, int tileID) -> bool {
+            int variant = 0;
+            if (tileID >= 38 && tileID <= 57) {
+                variant = (tileID - 38) % 5 + 1;
+            }
+            return leafMasks[variant][py][px] == '#';
         };
 
         // Generate each 16x16 tile
-        for (int tileID = 0; tileID < 32; ++tileID) {
+        for (int tileID = 0; tileID < 58; ++tileID) {
             int startX = (tileID % TILES_PER_ROW) * TILE_SIZE;
             int startY = (tileID / TILES_PER_ROW) * TILE_SIZE;
 
@@ -104,11 +159,16 @@ public:
                             setPixel(ax, ay, r, g, b);
                             break;
                         }
-                        case 7: { // Standard Oak Leaves
+                        case 7: // Standard Oak Leaves
+                        case 38:
+                        case 39:
+                        case 40:
+                        case 41:
+                        case 42: {
                             uint8_t r = (uint8_t)std::clamp(45.0f + n * 40.0f, 0.0f, 255.0f);
                             uint8_t g = (uint8_t)std::clamp(155.0f + n * 50.0f, 0.0f, 255.0f);
                             uint8_t b = (uint8_t)std::clamp(35.0f + n * 30.0f, 0.0f, 255.0f);
-                            uint8_t alpha = (px % 3 == 0 && py % 3 == 0) ? 200 : 255;
+                            uint8_t alpha = leafMask(px, py, tileID) ? 255 : 0;
                             setPixel(ax, ay, r, g, b, alpha);
                             break;
                         }
@@ -148,11 +208,16 @@ public:
                             setPixel(ax, ay, r, g, b);
                             break;
                         }
-                        case 13: { // Light Spring Oak Leaves
+                        case 13: // Light Spring Oak Leaves
+                        case 43:
+                        case 44:
+                        case 45:
+                        case 46:
+                        case 47: {
                             uint8_t r = (uint8_t)std::clamp(65.0f + n * 40.0f, 0.0f, 255.0f);
                             uint8_t g = (uint8_t)std::clamp(180.0f + n * 50.0f, 0.0f, 255.0f);
                             uint8_t b = (uint8_t)std::clamp(45.0f + n * 30.0f, 0.0f, 255.0f);
-                            uint8_t alpha = (px % 3 == 0 && py % 3 == 0) ? 200 : 255;
+                            uint8_t alpha = leafMask(px, py, tileID) ? 255 : 0;
                             setPixel(ax, ay, r, g, b, alpha);
                             break;
                         }
@@ -177,7 +242,7 @@ public:
                             uint8_t r = (uint8_t)std::clamp(20.0f + n * 30.0f, 0.0f, 255.0f);
                             uint8_t g = (uint8_t)std::clamp(100.0f + n * 45.0f, 0.0f, 255.0f);
                             uint8_t b = (uint8_t)std::clamp(45.0f + n * 35.0f, 0.0f, 255.0f);
-                            uint8_t alpha = (px % 3 == 0 && py % 3 == 0) ? 200 : 255;
+                            uint8_t alpha = leafMask(px, py, tileID) ? 255 : 0;
                             setPixel(ax, ay, r, g, b, alpha);
                             break;
                         }
@@ -198,11 +263,16 @@ public:
                             setPixel(ax, ay, r, g, b);
                             break;
                         }
-                        case 19: { // Dark Forest Oak Leaves
+                        case 19: // Dark Forest Oak Leaves
+                        case 48:
+                        case 49:
+                        case 50:
+                        case 51:
+                        case 52: {
                             uint8_t r = (uint8_t)std::clamp(25.0f + n * 30.0f, 0.0f, 255.0f);
                             uint8_t g = (uint8_t)std::clamp(125.0f + n * 40.0f, 0.0f, 255.0f);
                             uint8_t b = (uint8_t)std::clamp(25.0f + n * 25.0f, 0.0f, 255.0f);
-                            uint8_t alpha = (px % 3 == 0 && py % 3 == 0) ? 200 : 255;
+                            uint8_t alpha = leafMask(px, py, tileID) ? 255 : 0;
                             setPixel(ax, ay, r, g, b, alpha);
                             break;
                         }
@@ -227,15 +297,20 @@ public:
                             uint8_t r = (uint8_t)std::clamp(245.0f + n * 15.0f, 0.0f, 255.0f);
                             uint8_t g = (uint8_t)std::clamp(140.0f + n * 50.0f, 0.0f, 255.0f);
                             uint8_t b = (uint8_t)std::clamp(185.0f + n * 40.0f, 0.0f, 255.0f);
-                            uint8_t alpha = (px % 3 == 0 && py % 3 == 0) ? 200 : 255;
+                            uint8_t alpha = leafMask(px, py, tileID) ? 255 : 0;
                             setPixel(ax, ay, r, g, b, alpha);
                             break;
                         }
-                        case 23: { // Warm Golden-Tipped Oak Leaves
+                        case 23: // Warm Golden-Tipped Oak Leaves
+                        case 53:
+                        case 54:
+                        case 55:
+                        case 56:
+                        case 57: {
                             uint8_t r = (uint8_t)std::clamp(85.0f + n * 40.0f, 0.0f, 255.0f);
                             uint8_t g = (uint8_t)std::clamp(160.0f + n * 45.0f, 0.0f, 255.0f);
                             uint8_t b = (uint8_t)std::clamp(30.0f + n * 25.0f, 0.0f, 255.0f);
-                            uint8_t alpha = (px % 3 == 0 && py % 3 == 0) ? 200 : 255;
+                            uint8_t alpha = leafMask(px, py, tileID) ? 255 : 0;
                             setPixel(ax, ay, r, g, b, alpha);
                             break;
                         }
@@ -260,7 +335,7 @@ public:
                             uint8_t r = (uint8_t)std::clamp(30.0f + n * 40.0f, 0.0f, 255.0f);
                             uint8_t g = (uint8_t)std::clamp(225.0f + n * 30.0f, 0.0f, 255.0f);
                             uint8_t b = (uint8_t)std::clamp(245.0f + n * 10.0f, 0.0f, 255.0f);
-                            uint8_t alpha = (px % 3 == 0 && py % 3 == 0) ? 200 : 255;
+                            uint8_t alpha = leafMask(px, py, tileID) ? 255 : 0;
                             setPixel(ax, ay, r, g, b, alpha);
                             break;
                         }
@@ -268,8 +343,163 @@ public:
                             uint8_t r = (uint8_t)std::clamp(245.0f + n * 10.0f, 0.0f, 255.0f);
                             uint8_t g = (uint8_t)std::clamp(205.0f + n * 40.0f, 0.0f, 255.0f);
                             uint8_t b = (uint8_t)std::clamp(30.0f + n * 30.0f, 0.0f, 255.0f);
-                            uint8_t alpha = (px % 3 == 0 && py % 3 == 0) ? 200 : 255;
+                            uint8_t alpha = leafMask(px, py, tileID) ? 255 : 0;
                             setPixel(ax, ay, r, g, b, alpha);
+                            break;
+                        }
+                        case 29: // Meadow grass lower
+                        case 30: // Fine grass lower
+                        case 31: // Seeded grass lower
+                        case 32: // Meadow grass upper
+                        case 33: // Fine grass upper
+                        case 34: // Seeded grass upper
+                        case 35: // Meadow grass two-tall lower
+                        case 36: // Fine grass two-tall lower
+                        case 37: { // Seeded grass two-tall lower
+                            // The rare two-block plant is authored as one
+                            // logical 16x32 sprite. The upper and lower atlas
+                            // tiles use the same global Y coordinate, so a
+                            // blade that crosses the split is mathematically
+                            // continuous at the block boundary.
+                            if (tileID >= 32) {
+                                bool upperHalf = tileID <= 34;
+                                int variant = upperHalf ? tileID - 32 : tileID - 35;
+                                float spriteHeight = upperHalf
+                                    ? static_cast<float>(31 - py)
+                                    : static_cast<float>(15 - py);
+                                float spriteNoise = randNoise(
+                                    px,
+                                    static_cast<int>(spriteHeight),
+                                    500 + variant * 17
+                                ) * 0.15f;
+                                auto onTallBlade = [&](float baseX, float lean,
+                                                       float bladeHeight, float width) {
+                                    if (spriteHeight < 1.0f || spriteHeight > bladeHeight) return false;
+                                    float t = spriteHeight / bladeHeight;
+                                    float centerX = baseX + lean * t;
+                                    float bladeWidth = width * (1.0f - 0.45f * t) *
+                                        (upperHalf ? 0.85f : 1.0f);
+                                    return std::abs((static_cast<float>(px) + 0.5f) - centerX) <= bladeWidth;
+                                };
+
+                                bool blade = false;
+                                if (variant == 0) {
+                                    blade = onTallBlade(2.4f, -1.2f, 22.0f, 0.9f) ||
+                                        onTallBlade(5.2f, 1.3f, 31.0f, 1.05f) ||
+                                        onTallBlade(8.0f, -0.7f, 31.0f, 1.2f) ||
+                                        onTallBlade(10.7f, 1.1f, 27.0f, 1.0f) ||
+                                        onTallBlade(13.2f, -1.0f, 24.0f, 0.9f);
+                                } else if (variant == 1) {
+                                    blade = onTallBlade(2.1f, 1.0f, 25.0f, 0.9f) ||
+                                        onTallBlade(4.9f, -1.1f, 31.0f, 1.0f) ||
+                                        onTallBlade(7.4f, 0.8f, 24.0f, 0.85f) ||
+                                        onTallBlade(9.8f, -1.3f, 31.0f, 1.1f) ||
+                                        onTallBlade(12.8f, 0.9f, 27.0f, 0.95f);
+                                } else {
+                                    blade = onTallBlade(2.8f, -0.9f, 23.0f, 0.9f) ||
+                                        onTallBlade(5.8f, 1.2f, 29.0f, 1.0f) ||
+                                        onTallBlade(8.1f, -0.8f, 31.0f, 1.1f) ||
+                                        onTallBlade(10.9f, 1.0f, 26.0f, 0.95f) ||
+                                        onTallBlade(13.3f, -0.7f, 21.0f, 0.85f);
+                                }
+
+                                float seedX = variant == 1 ? 9.8f : 8.0f;
+                                bool seedHead = variant == 2 &&
+                                    spriteHeight >= 27.0f && spriteHeight <= 31.0f &&
+                                    std::abs((static_cast<float>(px) + 0.5f) - seedX) <= 1.0f;
+                                bool rootedTuft = !upperHalf && spriteHeight <= 2.0f &&
+                                    px >= 1 && px <= 14 && ((px + py + tileID) % 3 != 0);
+
+                                if (blade || rootedTuft || seedHead) {
+                                    float shade = spriteNoise * 0.8f +
+                                        (((px * 3 + static_cast<int>(spriteHeight) + variant) % 7 == 0)
+                                            ? 0.12f : 0.0f);
+                                    // Use the exact same palette as the normal
+                                    // grass sprites below. Only the sprite
+                                    // layout differs between the two variants.
+                                    uint8_t r = seedHead
+                                        ? (uint8_t)std::clamp(150.0f + shade * 35.0f, 0.0f, 255.0f)
+                                        : (uint8_t)std::clamp(30.0f + shade * 35.0f, 0.0f, 255.0f);
+                                    uint8_t g = seedHead
+                                        ? (uint8_t)std::clamp(170.0f + shade * 35.0f, 0.0f, 255.0f)
+                                        : (uint8_t)std::clamp(118.0f + shade * 70.0f, 0.0f, 255.0f);
+                                    uint8_t b = seedHead
+                                        ? (uint8_t)std::clamp(55.0f + shade * 20.0f, 0.0f, 255.0f)
+                                        : (uint8_t)std::clamp(30.0f + shade * 35.0f, 0.0f, 255.0f);
+                                    setPixel(ax, ay, r, g, b, 255);
+                                } else {
+                                    setPixel(ax, ay, 0, 0, 0, 0);
+                                }
+                                break;
+                            }
+
+                            float height = static_cast<float>(15 - py);
+                            bool upperHalf = tileID >= 32 && tileID <= 34;
+                            bool specializedLower = tileID >= 35;
+                            int grassVariant = specializedLower
+                                ? (tileID - 35) % 3
+                                : (tileID - 29) % 3;
+                            auto onBlade = [&](float baseX, float lean, float bladeHeight, float width) {
+                                if (height < 1.0f || height > bladeHeight) return false;
+                                float t = height / bladeHeight;
+                                float centerX = baseX + lean * t;
+                                float upperWidthScale = upperHalf ? 0.85f : 1.0f;
+                                float bladeWidth = width * (1.0f - 0.45f * t) * upperWidthScale;
+                                return std::abs((static_cast<float>(px) + 0.5f) - centerX) <= bladeWidth;
+                            };
+
+                            bool blade = false;
+                            bool seedHead = false;
+                            if (grassVariant == 2) {
+                                blade = onBlade(3.0f, 0.65f, 9.0f, 0.85f) ||
+                                    onBlade(6.0f, -0.8f, 13.0f, 0.95f) ||
+                                    onBlade(8.3f, 0.45f, 15.0f, 1.0f) ||
+                                    onBlade(11.0f, -0.65f, 11.0f, 0.9f) ||
+                                    onBlade(13.4f, 0.5f, 8.0f, 0.8f);
+                                float seedX = (px < 8) ? 6.0f : 8.3f;
+                                seedHead = height >= 12.0f && height <= 15.0f &&
+                                    std::abs((static_cast<float>(px) + 0.5f) - seedX) <= 1.0f;
+                            } else if (grassVariant == 0) {
+                                blade = onBlade(2.5f, -0.8f, 8.0f, 0.85f) ||
+                                    onBlade(5.3f, 0.9f, 12.0f, 1.0f) ||
+                                    onBlade(8.0f, -0.45f, 15.0f, 1.1f) ||
+                                    onBlade(10.7f, 0.75f, 10.0f, 0.9f) ||
+                                    onBlade(13.2f, -0.7f, 7.0f, 0.8f);
+                            } else {
+                                blade = onBlade(2.2f, 0.7f, 10.0f, 0.9f) ||
+                                    onBlade(4.8f, -0.55f, 14.0f, 0.95f) ||
+                                    onBlade(7.2f, 0.35f, 9.0f, 0.8f) ||
+                                    onBlade(9.6f, -0.75f, 15.0f, 1.05f) ||
+                                    onBlade(12.8f, 0.55f, 11.0f, 0.9f);
+                            }
+
+                            // Upper sections stay narrower at their base so
+                            // the two-block plant reads as one continuous stem.
+                            // Opaque pixels at the bottom make the blades meet
+                            // the soil instead of appearing to hover above it.
+                            bool twoTallStem = specializedLower && height >= 6.0f && height <= 12.0f &&
+                                px >= 7 && px <= 8;
+                            bool rootedTuft = !upperHalf && height <= 2.0f && px >= 1 && px <= 14 &&
+                                ((px + py + tileID) % 3 != 0);
+                            if (blade || rootedTuft || seedHead || twoTallStem) {
+                                float highlight = ((px * 3 + py + tileID) % 7 == 0) ? 1.0f : 0.0f;
+                                float shade = n * 0.8f + highlight * 0.12f;
+                                uint8_t r = 0;
+                                uint8_t g = 0;
+                                uint8_t b = 0;
+                                if (seedHead) {
+                                    r = (uint8_t)std::clamp(150.0f + shade * 35.0f, 0.0f, 255.0f);
+                                    g = (uint8_t)std::clamp(170.0f + shade * 35.0f, 0.0f, 255.0f);
+                                    b = (uint8_t)std::clamp(55.0f + shade * 20.0f, 0.0f, 255.0f);
+                                } else {
+                                    r = (uint8_t)std::clamp(30.0f + shade * 35.0f, 0.0f, 255.0f);
+                                    g = (uint8_t)std::clamp(118.0f + shade * 70.0f, 0.0f, 255.0f);
+                                    b = (uint8_t)std::clamp(30.0f + shade * 35.0f, 0.0f, 255.0f);
+                                }
+                                setPixel(ax, ay, r, g, b, 255);
+                            } else {
+                                setPixel(ax, ay, 0, 0, 0, 0);
+                            }
                             break;
                         }
                         default: { // Fallback magenta pattern
@@ -287,12 +517,14 @@ public:
         glBindTexture(GL_TEXTURE_2D, texId);
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, ATLAS_SIZE, ATLAS_SIZE, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
 
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_LINEAR);
+        // This is a pixel-art atlas. Mipmaps blend neighboring tiles (the
+        // unused magic/leaf tiles included), which leaks purple and blue into
+        // the grass silhouettes. Keep sampling on the authored tile pixels.
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-        glGenerateMipmap(GL_TEXTURE_2D);
-
         return texId;
     }
 };
