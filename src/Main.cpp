@@ -168,8 +168,7 @@ int main(int argc, char** argv) {
         layout (location = 4) in float aAO;
         layout (location = 5) in vec3 aBlockRGB;
         layout (location = 6) in float aSkyLight;
-        layout (location = 7) in float aLodLevel;
-        layout (location = 8) in float aWindWeight;
+        layout (location = 7) in float aWindWeight;
 
         out vec3 vNormal;
         out vec2 vTexCoord;
@@ -180,7 +179,7 @@ int main(int argc, char** argv) {
         out vec3 vBlockRGB;
         out float vSkyLight;
         out float vDistance;
-        out float vLodLevel;
+        
         out vec3 vWorldPosRelative;
 
         uniform mat4 uProjection;
@@ -224,7 +223,7 @@ int main(int argc, char** argv) {
             vBlockRGB = aBlockRGB;
             vSkyLight = aSkyLight;
             vDistance = length(relPos);
-            vLodLevel = section.chunkMinLod.w;
+            
             vWorldPosRelative = relPos;
         }
     )";
@@ -240,7 +239,7 @@ int main(int argc, char** argv) {
         in vec3 vBlockRGB;
         in float vSkyLight;
         in float vDistance;
-        in float vLodLevel;
+            
         in vec3 vWorldPosRelative;
 
         out vec4 FragColor;
@@ -271,7 +270,13 @@ int main(int argc, char** argv) {
                 );
                 texColor = texelFetch(uTextureAtlas, tileBase + localPixel, 0);
             } else {
-                texColor = texture(uTextureAtlas, vTexCoord);
+                vec2 atlasTile = vec2(
+                    mod(vTexIndex, 16.0),
+                    floor(vTexIndex / 16.0)
+                );
+                vec2 repeatedUV = fract(vTexCoord * 16.0);
+                vec2 atlasUV = (atlasTile + min(repeatedUV, vec2(0.999))) / 16.0;
+                texColor = texture(uTextureAtlas, atlasUV);
             }
             if (texColor.a < 0.1) discard;
 
@@ -314,176 +319,7 @@ int main(int argc, char** argv) {
         }
     )";
 
-    const char* visibilityShaderSrc = R"(
-        #version 430 core
-        layout(local_size_x = 64) in;
-
-        struct TraversalNode {
-            vec4 chunkMinLod;
-            vec4 sectionBounds;
-            uvec4 topology;
-            uvec4 draw0;
-            uvec4 draw1;
-        };
-        layout(std430, binding = 0) readonly buffer TraversalNodeBuffer {
-            TraversalNode nodes[];
-        };
-
-        struct SectionMetadata {
-            vec4 chunkMinLod;
-            vec4 sectionBounds;
-        };
-        layout(std430, binding = 1) buffer VisibleMetadataBuffer {
-            SectionMetadata visibleMetadata[];
-        };
-
-        layout(std430, binding = 2) buffer VisibleCommandBuffer {
-            // An indirect draw command is 20 tightly packed bytes. A GLSL
-            // std430 array of structs would use a 32-byte stride because the
-            // struct's base alignment is rounded up to 16 bytes, which does
-            // not match GL_DRAW_INDIRECT_BUFFER. Address the five words
-            // explicitly so the SSBO and indirect-draw views share the same
-            // byte layout.
-            uint visibleCommandWords[];
-        };
-
-        layout(std430, binding = 3) readonly buffer RootBuffer {
-            uint roots[];
-        };
-        layout(std430, binding = 4) readonly buffer ChildLinkBuffer {
-            uint childLinks[];
-        };
-
-        layout(std430, binding = 5) readonly buffer CurrentQueueBuffer {
-            uint currentQueue[];
-        };
-        layout(std430, binding = 6) writeonly buffer NextQueueBuffer {
-            uint nextQueue[];
-        };
-        layout(std430, binding = 7) buffer QueueCounterBuffer {
-            uint currentCount;
-            uint nextCount;
-        } queueCounters;
-
-        uniform mat4 uView;
-        uniform mat4 uViewProjection;
-        uniform float uProjectionY;
-        uniform vec2 uViewportSize;
-        uniform float uScreenDiameterThreshold;
-        uniform uint uNodeCount;
-        uniform uint uRootCount;
-        uniform uint uQueueCapacity;
-        uniform uint uLevel;
-        uniform int uMode;
-
-        bool outsideFrustum(vec3 minP, float size) {
-            for (int plane = 0; plane < 6; ++plane) {
-                bool allOutside = true;
-                for (int corner = 0; corner < 8; ++corner) {
-                    vec3 offset = vec3(
-                        ((corner & 1) != 0) ? size : 0.0,
-                        ((corner & 2) != 0) ? size : 0.0,
-                        ((corner & 4) != 0) ? size : 0.0
-                    );
-                    vec4 clip = uViewProjection * vec4(minP + offset, 1.0);
-                    if (clip.w <= 0.0) {
-                        allOutside = false;
-                        break;
-                    }
-                    bool outside = false;
-                    if (plane == 0) outside = clip.x < -clip.w;
-                    if (plane == 1) outside = clip.x >  clip.w;
-                    if (plane == 2) outside = clip.y < -clip.w;
-                    if (plane == 3) outside = clip.y >  clip.w;
-                    if (plane == 4) outside = clip.z < -clip.w;
-                    if (plane == 5) outside = clip.z >  clip.w;
-                    allOutside = allOutside && outside;
-                }
-                if (allOutside) return true;
-            }
-            return false;
-        }
-
-
-        bool shouldDescend(TraversalNode node) {
-            if (node.topology.y == 0u || node.topology.z == 0u) return false;
-            vec3 minP = node.chunkMinLod.xyz;
-            float size = node.sectionBounds.x;
-            float geometricError = node.sectionBounds.y;
-            bool wasSplit = node.sectionBounds.z > 0.5;
-
-            vec3 maxP = minP + vec3(size);
-            vec3 d = max(vec3(0.0), max(minP, -maxP));
-            float dist = max(0.1, length(d));
-
-            float projectionScale = 0.5 * uProjectionY * uViewportSize.y;
-            float pixelError = geometricError * projectionScale / dist;
-
-            float splitThreshold = uScreenDiameterThreshold;
-            float mergeThreshold = splitThreshold * 0.625;
-            return wasSplit ? (pixelError > mergeThreshold) : (pixelError > splitThreshold);
-        }
-
-        void emitNode(uint nodeIndex) {
-            TraversalNode node = nodes[nodeIndex];
-            if (node.topology.w == 0u) return;
-            visibleMetadata[nodeIndex].chunkMinLod = node.chunkMinLod;
-            visibleMetadata[nodeIndex].sectionBounds = node.sectionBounds;
-            uint commandBase = nodeIndex * 5u;
-            visibleCommandWords[commandBase + 0u] = node.draw0.x;
-            visibleCommandWords[commandBase + 1u] = node.draw0.y;
-            visibleCommandWords[commandBase + 2u] = node.draw0.z;
-            visibleCommandWords[commandBase + 3u] = node.draw0.w;
-            visibleCommandWords[commandBase + 4u] = node.draw1.x;
-        }
-
-        void main() {
-            uint invocation = gl_GlobalInvocationID.x;
-            if (uMode == 0) {
-                if (invocation < uNodeCount) {
-                    visibleCommandWords[invocation * 5u] = 0u;
-                }
-                return;
-            }
-            if (uMode == 2) {
-                if (invocation == 0u) {
-                    queueCounters.currentCount = min(queueCounters.nextCount, uQueueCapacity);
-                    queueCounters.nextCount = 0u;
-                }
-                return;
-            }
-
-            uint activeCount = min(queueCounters.currentCount, uQueueCapacity);
-            if (invocation >= activeCount) return;
-
-            uint nodeIndex = currentQueue[invocation];
-            if (nodeIndex >= uNodeCount) return;
-            TraversalNode node = nodes[nodeIndex];
-            if (outsideFrustum(node.chunkMinLod.xyz, node.sectionBounds.x)) return;
-
-            if (uLevel < 4u && node.topology.y > 0u && shouldDescend(node)) {
-                uint firstChild = node.topology.x;
-                uint childCount = node.topology.y;
-                uint appendBase = atomicAdd(queueCounters.nextCount, childCount);
-                if (appendBase + childCount <= uQueueCapacity) {
-                    for (uint child = 0u; child < childCount; ++child) {
-                        nextQueue[appendBase + child] = childLinks[firstChild + child];
-                    }
-                } else {
-                    emitNode(nodeIndex);
-                }
-            } else {
-                emitNode(nodeIndex);
-            }
-        }
-    )";
-
     Shader voxelShader(vShaderSrc, fShaderSrc);
-    Shader visibilityShader;
-    visibilityShader.compileCompute(visibilityShaderSrc);
-    if (visibilityShader.programID == 0) {
-        std::cerr << "GPU traversal compute shader unavailable; the renderer will not use a CPU fallback.\n";
-    }
 
     // Initialize Skybox & HUD
     Skybox skybox;
@@ -523,7 +359,7 @@ int main(int argc, char** argv) {
             std::cerr << "Failed to open diagnostics report: " << diagnosticsPath << "\n";
             traversalFailure = true;
         } else {
-            diagnosticsFile << "frame,elapsed_s,update_ms,traversal_ms,hud_ms,swap_ms,readback_ms,total_to_swap_ms,total_loop_ms,loaded_chunks,uploaded_meshes,pending_tasks,nodes,roots,candidate_indices,largest_candidate,emitted_commands,emitted_indices,largest_emitted,gpu_verified,command_valid,gl_error,gl_start,gl_update,gl_traversal,gl_hud,gl_swap,gl_readback\n";
+            diagnosticsFile << "frame,elapsed_s,update_ms,traversal_ms,hud_ms,swap_ms,readback_ms,total_to_swap_ms,total_loop_ms,loaded_chunks,uploaded_meshes,pending_tasks,nodes,roots,candidate_indices,largest_candidate,emitted_commands,emitted_indices,largest_emitted,cpu_traversal,command_valid,gl_error,gl_start,gl_update,gl_traversal,gl_hud,gl_swap,gl_readback\n";
             diagnosticsStartTime = glfwGetTime();
         }
     }
@@ -643,13 +479,12 @@ int main(int argc, char** argv) {
             windowWidth,
             windowHeight,
             voxelShader.programID,
-            visibilityShader.programID,
             projection.m[5],
             view,
             viewProjection
         )) {
             traversalFailure = true;
-            std::cerr << "GPU traversal verification failed; stopping instead of using CPU traversal.\n";
+            std::cerr << "Renderer failed because its geometry arena is unavailable.\n";
             break;
         }
         auto traversalEnd = std::chrono::high_resolution_clock::now();
@@ -723,7 +558,7 @@ int main(int argc, char** argv) {
                 << frameDiagnostics.emittedCommands.nonZeroCommands << ','
                 << frameDiagnostics.emittedCommands.totalIndices << ','
                 << frameDiagnostics.emittedCommands.maxIndices << ','
-                << (frameDiagnostics.gpuTraversalVerified ? 1 : 0) << ','
+                << (frameDiagnostics.cpuTraversalUsed ? 1 : 0) << ','
                 << (frameDiagnostics.commandPayloadValid ? 1 : 0) << ','
                 << static_cast<unsigned int>(glError) << ','
                 << static_cast<unsigned int>(frameStartGlError) << ','

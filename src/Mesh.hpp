@@ -19,7 +19,6 @@ struct VoxelVertex {
     float ao;             // Ambient Occlusion (0.2 - 1.0)
     float lightR, lightG, lightB; // Emissive RGB Block Light
     float skyLight;       // 3D Sky Light (0.0 - 1.0)
-    float lodLevel;       // LOD level for shader fog/fade
     float windWeight;     // 0 at the ground, 1 at the tip of wind-animated plants
 };
 
@@ -52,16 +51,6 @@ struct alignas(16) SectionGpuMetadata {
     float sectionBounds[4] = {}; // world size, reserved
 };
 
-struct alignas(16) TraversalNodeGpu {
-    float chunkMinLod[4] = {};
-    float sectionBounds[4] = {};
-    uint32_t topology[4] = {}; // first child, child count, complete, geometry
-    uint32_t draw0[4] = {}; // count, instances, first index, base vertex bits
-    uint32_t draw1[4] = {}; // base instance, reserved
-};
-
-static_assert(sizeof(SectionGpuMetadata) == 32, "SSBO metadata must remain two vec4 values");
-static_assert(sizeof(TraversalNodeGpu) == 80, "Traversal node layout must match std430");
 static_assert(sizeof(DrawElementsIndirectCommand) == 20, "Indirect command layout must match OpenGL");
 
 class GeometryArena {
@@ -76,12 +65,6 @@ private:
     GLuint ebo = 0;
     GLuint metadataBuffer = 0;
     GLuint indirectBuffer = 0;
-    GLuint nodeBuffer = 0;
-    GLuint rootBuffer = 0;
-    GLuint childLinkBuffer = 0;
-    GLuint traversalQueueA = 0;
-    GLuint traversalQueueB = 0;
-    GLuint traversalCounterBuffer = 0;
     static constexpr size_t NUM_FRAME_CONTEXTS = 3;
     struct FrameContext {
         GLsync fence = 0;
@@ -101,10 +84,6 @@ private:
     std::vector<FreeRange> freeIndexRanges;
     size_t metadataCapacityBytes = 0;
     size_t indirectCapacityBytes = 0;
-    size_t nodeCapacityBytes = 0;
-    size_t rootCapacityBytes = 0;
-    size_t childLinkCapacityBytes = 0;
-    size_t traversalQueueCapacityBytes = 0;
 
     static size_t allocateRange(std::vector<FreeRange>& ranges, size_t count) {
         size_t best = std::numeric_limits<size_t>::max();
@@ -169,9 +148,7 @@ private:
         glEnableVertexAttribArray(6);
         glVertexAttribPointer(6, 1, GL_FLOAT, GL_FALSE, sizeof(VoxelVertex), (void*)offsetof(VoxelVertex, skyLight));
         glEnableVertexAttribArray(7);
-        glVertexAttribPointer(7, 1, GL_FLOAT, GL_FALSE, sizeof(VoxelVertex), (void*)offsetof(VoxelVertex, lodLevel));
-        glEnableVertexAttribArray(8);
-        glVertexAttribPointer(8, 1, GL_FLOAT, GL_FALSE, sizeof(VoxelVertex), (void*)offsetof(VoxelVertex, windWeight));
+        glVertexAttribPointer(7, 1, GL_FLOAT, GL_FALSE, sizeof(VoxelVertex), (void*)offsetof(VoxelVertex, windWeight));
         glBindVertexArray(0);
     }
 
@@ -280,7 +257,7 @@ public:
 
     // Leave enough headroom for the initial streamed view so the render
     // thread does not hit an arena growth boundary during normal play.
-    bool initialize(size_t initialVertices = 8u << 20, size_t initialIndices = 24u << 20) {
+    bool initialize(size_t initialVertices = 1u << 20, size_t initialIndices = 3u << 20) {
         if (initialized) return true;
 
         vertexCapacity = initialVertices;
@@ -295,11 +272,6 @@ public:
             glGenBuffers(1, &frameContexts[i].metadataBuffer);
             glGenBuffers(1, &frameContexts[i].indirectBuffer);
         }
-        glGenBuffers(1, &rootBuffer);
-        glGenBuffers(1, &childLinkBuffer);
-        glGenBuffers(1, &traversalQueueA);
-        glGenBuffers(1, &traversalQueueB);
-        glGenBuffers(1, &traversalCounterBuffer);
 
         glBindVertexArray(vao);
         glBindBuffer(GL_ARRAY_BUFFER, vbo);
@@ -334,27 +306,15 @@ public:
             frameContexts[i].indirectCapacityBytes = 0;
             frameContexts[i].retiredGeometry.clear();
         }
-        if (traversalCounterBuffer) glDeleteBuffers(1, &traversalCounterBuffer);
-        if (traversalQueueB) glDeleteBuffers(1, &traversalQueueB);
-        if (traversalQueueA) glDeleteBuffers(1, &traversalQueueA);
-        if (childLinkBuffer) glDeleteBuffers(1, &childLinkBuffer);
-        if (rootBuffer) glDeleteBuffers(1, &rootBuffer);
-        if (nodeBuffer) glDeleteBuffers(1, &nodeBuffer);
         if (ebo) glDeleteBuffers(1, &ebo);
         if (vbo) glDeleteBuffers(1, &vbo);
         if (vao) glDeleteVertexArrays(1, &vao);
         vao = vbo = ebo = 0;
-        nodeBuffer = rootBuffer = childLinkBuffer = 0;
-        traversalQueueA = traversalQueueB = traversalCounterBuffer = 0;
         initialized = false;
         vertexCapacity = 0;
         indexCapacity = 0;
         freeVertexRanges.clear();
         freeIndexRanges.clear();
-        nodeCapacityBytes = 0;
-        rootCapacityBytes = 0;
-        childLinkCapacityBytes = 0;
-        traversalQueueCapacityBytes = 0;
     }
 
     void advanceFrame() {
@@ -485,180 +445,8 @@ public:
         }
     }
 
-    void uploadTraversalData(
-        const std::vector<TraversalNodeGpu>& nodes,
-        const std::vector<uint32_t>& roots,
-        const std::vector<uint32_t>& childLinks
-    ) {
-        if (!initialized) return;
 
-        size_t nodeBytes = nodes.size() * sizeof(TraversalNodeGpu);
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, nodeBuffer);
-        if (nodeBytes > nodeCapacityBytes) {
-            nodeCapacityBytes = std::max(nodeBytes, std::max<size_t>(sizeof(TraversalNodeGpu), nodeCapacityBytes * 2));
-            glBufferData(GL_SHADER_STORAGE_BUFFER, static_cast<GLsizeiptr>(nodeCapacityBytes), nullptr, GL_DYNAMIC_DRAW);
-        }
-        if (nodeBytes > 0) {
-            glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, static_cast<GLsizeiptr>(nodeBytes), nodes.data());
-        }
 
-        size_t rootBytes = roots.size() * sizeof(uint32_t);
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, rootBuffer);
-        if (rootBytes > rootCapacityBytes) {
-            rootCapacityBytes = std::max(rootBytes, std::max<size_t>(sizeof(uint32_t), rootCapacityBytes * 2));
-            glBufferData(GL_SHADER_STORAGE_BUFFER, static_cast<GLsizeiptr>(rootCapacityBytes), nullptr, GL_DYNAMIC_DRAW);
-        }
-        if (rootBytes > 0) {
-            glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, static_cast<GLsizeiptr>(rootBytes), roots.data());
-        }
-
-        size_t childLinkBytes = childLinks.size() * sizeof(uint32_t);
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, childLinkBuffer);
-        if (childLinkBytes > childLinkCapacityBytes) {
-            childLinkCapacityBytes = std::max(childLinkBytes, std::max<size_t>(sizeof(uint32_t), childLinkCapacityBytes * 2));
-            glBufferData(GL_SHADER_STORAGE_BUFFER, static_cast<GLsizeiptr>(childLinkCapacityBytes), nullptr, GL_DYNAMIC_DRAW);
-        }
-        if (childLinkBytes > 0) {
-            glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, static_cast<GLsizeiptr>(childLinkBytes), childLinks.data());
-        }
-
-        // The traversal queue contains each resident node at most once. Two
-        // buffers are alternated between levels so child expansion never
-        // overwrites the queue currently being consumed.
-        size_t queueBytes = std::max<size_t>(sizeof(uint32_t), nodes.size() * sizeof(uint32_t));
-        if (queueBytes > traversalQueueCapacityBytes) {
-            traversalQueueCapacityBytes = std::max(queueBytes, std::max<size_t>(sizeof(uint32_t), traversalQueueCapacityBytes * 2));
-            glBindBuffer(GL_SHADER_STORAGE_BUFFER, traversalQueueA);
-            glBufferData(GL_SHADER_STORAGE_BUFFER, static_cast<GLsizeiptr>(traversalQueueCapacityBytes), nullptr, GL_DYNAMIC_DRAW);
-            glBindBuffer(GL_SHADER_STORAGE_BUFFER, traversalQueueB);
-            glBufferData(GL_SHADER_STORAGE_BUFFER, static_cast<GLsizeiptr>(traversalQueueCapacityBytes), nullptr, GL_DYNAMIC_DRAW);
-        }
-        if (rootBytes > 0) {
-            glBindBuffer(GL_SHADER_STORAGE_BUFFER, traversalQueueA);
-            glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, static_cast<GLsizeiptr>(rootBytes), roots.data());
-        }
-
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, traversalCounterBuffer);
-        uint32_t queueCounts[2] = {
-            static_cast<uint32_t>(roots.size()),
-            0u
-        };
-        glBufferData(
-            GL_SHADER_STORAGE_BUFFER,
-            static_cast<GLsizeiptr>(sizeof(queueCounts)),
-            queueCounts,
-            GL_DYNAMIC_DRAW
-        );
-
-        size_t metadataBytes = nodes.size() * sizeof(SectionGpuMetadata);
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, metadataBuffer);
-        if (metadataBytes > metadataCapacityBytes) {
-            metadataCapacityBytes = std::max(metadataBytes, std::max<size_t>(sizeof(SectionGpuMetadata), metadataCapacityBytes * 2));
-            glBufferData(GL_SHADER_STORAGE_BUFFER, static_cast<GLsizeiptr>(metadataCapacityBytes), nullptr, GL_STREAM_DRAW);
-        }
-
-        size_t indirectBytes = nodes.size() * sizeof(DrawElementsIndirectCommand);
-        glBindBuffer(GL_DRAW_INDIRECT_BUFFER, indirectBuffer);
-        if (indirectBytes > indirectCapacityBytes) {
-            indirectCapacityBytes = std::max(indirectBytes, std::max<size_t>(sizeof(DrawElementsIndirectCommand), indirectCapacityBytes * 2));
-            glBufferData(GL_DRAW_INDIRECT_BUFFER, static_cast<GLsizeiptr>(indirectCapacityBytes), nullptr, GL_STREAM_DRAW);
-        }
-        // Reset the exact packed command range before the GPU traversal. The
-        // compute clear remains as a second GPU-side guard, but this also
-        // makes freshly orphaned storage deterministic on every driver.
-        if (indirectBytes > 0) {
-            std::vector<uint32_t> clearedCommandWords(nodes.size() * 5u, 0u);
-            glBufferSubData(
-                GL_DRAW_INDIRECT_BUFFER,
-                0,
-                static_cast<GLsizeiptr>(indirectBytes),
-                clearedCommandWords.data()
-            );
-        }
-    }
-
-    void dispatchTraversal(
-        GLuint computeProgram,
-        const Mat4& view,
-        const Mat4& viewProjection,
-        float projectionY,
-        int viewportWidth,
-        int viewportHeight,
-        float screenDiameterThreshold,
-        size_t nodeCount,
-        size_t rootCount
-    ) const {
-        if (!initialized || computeProgram == 0 || nodeCount == 0) return;
-        glUseProgram(computeProgram);
-        glUniformMatrix4fv(glGetUniformLocation(computeProgram, "uView"), 1, GL_FALSE, view.m);
-        glUniformMatrix4fv(glGetUniformLocation(computeProgram, "uViewProjection"), 1, GL_FALSE, viewProjection.m);
-        glUniform1f(glGetUniformLocation(computeProgram, "uProjectionY"), projectionY);
-        glUniform2f(glGetUniformLocation(computeProgram, "uViewportSize"), static_cast<float>(viewportWidth), static_cast<float>(viewportHeight));
-        glUniform1f(glGetUniformLocation(computeProgram, "uScreenDiameterThreshold"), screenDiameterThreshold);
-        glUniform1ui(glGetUniformLocation(computeProgram, "uNodeCount"), static_cast<GLuint>(nodeCount));
-        glUniform1ui(glGetUniformLocation(computeProgram, "uRootCount"), static_cast<GLuint>(rootCount));
-        glUniform1ui(glGetUniformLocation(computeProgram, "uQueueCapacity"), static_cast<GLuint>(nodeCount));
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, nodeBuffer);
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, metadataBuffer);
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, indirectBuffer);
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, rootBuffer);
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 4, childLinkBuffer);
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 5, traversalQueueA);
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 6, traversalQueueB);
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 7, traversalCounterBuffer);
-
-        // First clear all indirect command slots. The bounded queue passes
-        // only write slots that survive culling/LOD selection.
-        glUniform1i(glGetUniformLocation(computeProgram, "uMode"), 0);
-        glDispatchCompute(static_cast<GLuint>((nodeCount + 63) / 64), 1, 1);
-        glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
-
-        GLuint currentQueue = traversalQueueA;
-        GLuint nextQueue = traversalQueueB;
-        for (GLuint level = 0; level < 5; ++level) {
-            glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 5, currentQueue);
-            glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 6, nextQueue);
-            glUniform1ui(glGetUniformLocation(computeProgram, "uLevel"), level);
-            glUniform1i(glGetUniformLocation(computeProgram, "uMode"), 1);
-            glDispatchCompute(static_cast<GLuint>((nodeCount + 63) / 64), 1, 1);
-            glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
-
-            if (level < 4) {
-                // Promote the child count to the next pass without a CPU
-                // readback, then swap the ping-pong queues.
-                glUniform1i(glGetUniformLocation(computeProgram, "uMode"), 2);
-                glDispatchCompute(1, 1, 1);
-                glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
-                std::swap(currentQueue, nextQueue);
-            }
-        }
-        glMemoryBarrier(
-            GL_SHADER_STORAGE_BARRIER_BIT |
-            GL_COMMAND_BARRIER_BIT |
-            GL_BUFFER_UPDATE_BARRIER_BIT
-        );
-        glActiveTexture(GL_TEXTURE0);
-    }
-
-    void dispatchVisibility(
-        GLuint computeProgram,
-        const Mat4& viewProjection,
-        size_t commandCount
-    ) const {
-        if (!initialized || computeProgram == 0 || commandCount == 0) return;
-
-        glUseProgram(computeProgram);
-        GLint viewProjectionLoc = glGetUniformLocation(computeProgram, "uViewProjection");
-        GLint commandCountLoc = glGetUniformLocation(computeProgram, "uCommandCount");
-        glUniformMatrix4fv(viewProjectionLoc, 1, GL_FALSE, viewProjection.m);
-        glUniform1ui(commandCountLoc, static_cast<GLuint>(commandCount));
-
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, metadataBuffer);
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, indirectBuffer);
-        GLuint workgroups = static_cast<GLuint>((commandCount + 63) / 64);
-        glDispatchCompute(workgroups, 1, 1);
-        glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_COMMAND_BARRIER_BIT);
-    }
 
     void drawIndirect(size_t commandCount) const {
         if (!initialized || commandCount == 0) return;
@@ -696,55 +484,7 @@ public:
         return diagnostics;
     }
 
-    bool validateIndirectCommands(
-        const std::vector<TraversalNodeGpu>& nodes,
-        bool reportFailure
-    ) const {
-        if (!initialized || nodes.empty()) return true;
-        std::vector<DrawElementsIndirectCommand> commands(nodes.size());
-        glBindBuffer(GL_DRAW_INDIRECT_BUFFER, indirectBuffer);
-        glGetBufferSubData(
-            GL_DRAW_INDIRECT_BUFFER,
-            0,
-            static_cast<GLsizeiptr>(commands.size() * sizeof(DrawElementsIndirectCommand)),
-            commands.data()
-        );
 
-        for (size_t i = 0; i < commands.size(); ++i) {
-            const DrawElementsIndirectCommand& actual = commands[i];
-            if (actual.count == 0) continue;
-            const TraversalNodeGpu& expected = nodes[i];
-            bool matches = actual.count == expected.draw0[0] &&
-                actual.instanceCount == expected.draw0[1] &&
-                actual.firstIndex == expected.draw0[2] &&
-                actual.baseVertex == static_cast<int32_t>(expected.draw0[3]) &&
-                actual.baseInstance == expected.draw1[0];
-            if (!matches) {
-                if (reportFailure) {
-                    std::cerr << "GPU indirect command mismatch at slot " << i
-                              << ": actual(count=" << actual.count
-                              << ", instances=" << actual.instanceCount
-                              << ", firstIndex=" << actual.firstIndex
-                              << ", baseVertex=" << actual.baseVertex
-                              << ", baseInstance=" << actual.baseInstance
-                              << ") expected(count=" << expected.draw0[0]
-                              << ", instances=" << expected.draw0[1]
-                              << ", firstIndex=" << expected.draw0[2]
-                              << ", baseVertex=" << static_cast<int32_t>(expected.draw0[3])
-                              << ", baseInstance=" << expected.draw1[0] << ").\n";
-                }
-                return false;
-            }
-        }
-        return true;
-    }
-
-    // One-shot startup diagnostic used to detect a driver that links the
-    // traversal shader but does not produce indirect commands. Keeping this
-    // out of the steady-state render loop avoids a permanent GPU readback.
-    bool hasNonZeroIndirectCommand(size_t commandCount) const {
-        return inspectIndirectCommands(commandCount).nonZeroCommands > 0;
-    }
 
     bool isInitialized() const { return initialized; }
 };

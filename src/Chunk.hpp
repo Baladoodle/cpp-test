@@ -48,11 +48,7 @@ struct Chunk {
     std::atomic<bool> isMeshUploaded{false};
     std::atomic<bool> isPendingWork{true};
     std::atomic<bool> resident{true};
-    std::atomic<bool> mipRemeshQueued{false};
     std::atomic<uint64_t> workToken{0};
-    std::atomic<uint64_t> mipRevision{0};
-    bool isFullyCovered = false;
-    bool wasSplitLastFrame = false;
     // Staging mesh data built on background thread
     std::vector<VoxelVertex> stagedVertices;
     std::vector<uint32_t> stagedIndices;

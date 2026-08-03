@@ -3,7 +3,6 @@
 
 #include "Chunk.hpp"
 #include "MeshBuilder.hpp"
-#include "VoxelMip.hpp"
 #include "MathUtils.hpp"
 #include <unordered_map>
 #include <unordered_set>
@@ -21,7 +20,12 @@
 class ChunkManager {
 public:
     static constexpr int NUM_LODS = 5; // LOD 0 through LOD 4 active
-    const int LOD_RADII[NUM_LODS] = { 4, 4, 4, 4, 4 }; // Preserve the existing radius for each tier
+    const int LOD_RADII[NUM_LODS] = { 2, 2, 2, 2, 2 };
+    // lower levels are requested only near the camera; coarse roots provide
+    // fallback coverage while fine meshes are generated.
+    static constexpr float LOD_MAX_DISTANCE[NUM_LODS] = {
+        192.0f, 384.0f, 768.0f, 1536.0f, 10000.0f
+    };
 
     struct FrameDiagnostics {
         uint64_t frameIndex = 0;
@@ -29,14 +33,13 @@ public:
         size_t rootCount = 0;
         uint64_t candidateIndices = 0;
         uint32_t largestCandidate = 0;
-        bool gpuTraversalVerified = false;
+        bool cpuTraversalUsed = false;
         bool commandPayloadValid = true;
         IndirectCommandDiagnostics emittedCommands;
     };
 
 private:
     GeometryArena geometryArena;
-    VoxelMipStore mipStore;
     uint64_t sceneRevision = 1;
     std::unordered_map<IVec3, std::shared_ptr<Chunk>, IVec3Hash> chunks[NUM_LODS];
     std::vector<Chunk*> renderableChunks;
@@ -84,7 +87,6 @@ private:
         uint64_t currentToken = task.chunk->workToken.load();
         if (currentToken == task.workToken &&
             task.chunk->workToken.compare_exchange_strong(currentToken, currentToken + 1)) {
-            task.chunk->mipRemeshQueued.store(false);
             task.chunk->isPendingWork.store(false);
         }
     }
@@ -218,8 +220,7 @@ private:
         float geometricError = static_cast<float>(1 << chunk->lod);
         float pixelError = geometricError * projectionScale / dist;
 
-        float threshold = chunk->wasSplitLastFrame ? (SCREEN_SPACE_DIAMETER_THRESHOLD * 0.625f)
-                                                   : SCREEN_SPACE_DIAMETER_THRESHOLD;
+        float threshold = SCREEN_SPACE_DIAMETER_THRESHOLD;
         bool wantsChildren = (chunk->lod > 0) && (pixelError > threshold);
 
         bool allChildrenReady = false;
@@ -247,7 +248,7 @@ private:
         }
 
         if (wantsChildren && allChildrenReady) {
-            chunk->wasSplitLastFrame = true;
+            
             int childLod = chunk->lod - 1;
             int childScale = 1 << childLod;
             int childWorldChunkSize = CHUNK_SIZE * childScale;
@@ -267,35 +268,9 @@ private:
                 }
             }
         } else {
-            chunk->wasSplitLastFrame = false;
+            
             if (chunk->isMeshUploaded.load() && !chunk->isEmpty && chunk->mesh.geometry.valid) {
                 selectedChunks.push_back(chunk);
-            }
-            if (wantsChildren && !allChildrenReady) {
-                int childLod = chunk->lod - 1;
-                int childScale = 1 << childLod;
-                int childWorldChunkSize = CHUNK_SIZE * childScale;
-                int64_t baseCX = floorDiv(chunk->worldMin.x, childWorldChunkSize);
-                int64_t baseCY = floorDiv(chunk->worldMin.y, childWorldChunkSize);
-                int64_t baseCZ = floorDiv(chunk->worldMin.z, childWorldChunkSize);
-
-                for (int dz = 0; dz < 2; ++dz) {
-                    for (int dy = 0; dy < 2; ++dy) {
-                        for (int dx = 0; dx < 2; ++dx) {
-                            IVec3 childPos(baseCX + dx, baseCY + dy, baseCZ + dz);
-                            auto it = chunks[childLod].find(childPos);
-                            if (it == chunks[childLod].end()) {
-                                auto newChunk = std::make_shared<Chunk>(childPos, childLod);
-                                newChunk->isPendingWork.store(true);
-                                chunks[childLod][childPos] = newChunk;
-                                enqueueGeneration(newChunk, cameraPos);
-                            } else if (!it->second->isGenerated.load() && !it->second->isPendingWork.load()) {
-                                it->second->isPendingWork.store(true);
-                                enqueueGeneration(it->second, cameraPos);
-                            }
-                        }
-                    }
-                }
             }
         }
     }
@@ -487,31 +462,16 @@ private:
 
                 if (!chunk->isGenerated.load()) {
                     auto t0 = std::chrono::high_resolution_clock::now();
-                    uint64_t mipRevision = 0;
-                    bool loadedFromMip = chunk->lod > 0 &&
-                        mipStore.readCompleteSection(
-                            chunk->lod,
-                            chunk->chunkPos,
-                            chunk->blocks,
-                            &mipRevision
-                        );
-                    if (loadedFromMip) {
-                        MeshBuilder::finalizeVoxelData(*chunk, nullptr, &mipStore);
-                        chunk->mipRevision.store(mipRevision);
-                    } else {
-                        MeshBuilder::generateVoxelData(*chunk);
-                        chunk->mipRevision.store(0);
-                    }
+                    MeshingNeighborhood neighborhood;
+                    MeshBuilder::generateVoxelData(*chunk, &neighborhood);
                     auto t1 = std::chrono::high_resolution_clock::now();
                     while (!stopThreads && stagedMeshBytes.load(std::memory_order_relaxed) >= MAX_STAGED_MESH_BYTES) {
                         std::this_thread::sleep_for(std::chrono::milliseconds(1));
                     }
-                    MeshBuilder::buildMesh(*chunk);
+                    MeshBuilder::buildMesh(*chunk, &neighborhood);
                     auto t2 = std::chrono::high_resolution_clock::now();
                     totalGenTimeUs += std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
                     totalMeshTimeUs += std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count();
-                    mipStore.publishSection(chunk->lod, chunk->chunkPos, chunk->blocks);
-                    chunk->mipRemeshQueued.store(false);
                     chunksProcessed++;
                     bool taskValid = chunk->resident.load(std::memory_order_acquire) &&
                         chunk->workToken.load(std::memory_order_acquire) == task.workToken;
@@ -528,7 +488,6 @@ private:
                     }
                 }
                 if (chunk->workToken.load() == task.workToken) {
-                    chunk->mipRemeshQueued.store(false);
                     chunk->isPendingWork.store(false);
                 }
             }
@@ -579,34 +538,6 @@ public:
             currentCamPos = cameraPos;
         }
 
-        // Child completion can replace an already-generated coarse section.
-        // Keep its current GPU mesh as a fallback while the worker rebuilds
-        // the section from the now-complete parent mip.
-        for (const VoxelMipStore::CompletedSection& completed : mipStore.drainCompleted()) {
-            if (completed.lod <= 0 || completed.lod >= NUM_LODS) continue;
-            auto it = chunks[completed.lod].find(completed.chunkPos);
-            if (it == chunks[completed.lod].end() || !it->second) continue;
-
-            Chunk* chunk = it->second.get();
-            if (chunk->isPendingWork.load()) {
-                mipStore.requeueCompleted(completed);
-                continue;
-            }
-            if (chunk->mipRemeshQueued.exchange(true)) continue;
-            uint64_t currentRevision = chunk->mipRevision.load();
-            if (completed.revision <= currentRevision ||
-                !mipStore.readCompleteSection(chunk->lod, chunk->chunkPos, chunk->blocks)) {
-                chunk->mipRemeshQueued.store(false);
-                continue;
-            }
-
-            chunk->isGenerated.store(false);
-            chunk->isMeshStaged.store(false);
-            chunk->stagedVertices.clear();
-            chunk->stagedIndices.clear();
-            chunk->isPendingWork.store(true);
-            enqueueGeneration(it->second, cameraPos);
-        }
 
         // Uploading many completed meshes in one main-thread pass can stall
         // the renderer even when generation itself happened off-thread. Keep
@@ -693,7 +624,7 @@ public:
             }
         }
 
-        // 4. Queue new chunks for loading around camera position (Concentric Seamless 3D LOD Shells)
+        // queue coarse fallback roots first, then request nearby fine levels.
         for (int lod = 0; lod < NUM_LODS; ++lod) {
             int scale = 1 << lod;
             int worldChunkSize = CHUNK_SIZE * scale;
@@ -711,6 +642,22 @@ public:
                 for (int64_t cy = camCY - radius; cy <= camCY + radius; ++cy) {
                     for (int64_t cx = camCX - radius; cx <= camCX + radius; ++cx) {
 
+                        if (lod < NUM_LODS - 1) {
+                            float centerX = static_cast<float>(cx * worldChunkSize) +
+                                static_cast<float>(worldChunkSize) * 0.5f;
+                            float centerY = static_cast<float>(cy * worldChunkSize) +
+                                static_cast<float>(worldChunkSize) * 0.5f;
+                            float centerZ = static_cast<float>(cz * worldChunkSize) +
+                                static_cast<float>(worldChunkSize) * 0.5f;
+                            float dx = centerX - cameraPos.x;
+                            float dy = centerY - cameraPos.y;
+                            float dz = centerZ - cameraPos.z;
+                            float maxDistance = LOD_MAX_DISTANCE[lod];
+                            if (dx * dx + dy * dy + dz * dz >
+                                maxDistance * maxDistance) {
+                                continue;
+                            }
+                        }
                         IVec3 cpos(cx, cy, cz);
                         auto it = chunks[lod].find(cpos);
                         if (it == chunks[lod].end()) {
@@ -725,7 +672,6 @@ public:
             }
         }
 
-        mipStore.prune(cameraPos);
     }
 
     bool render(
@@ -735,7 +681,6 @@ public:
         int viewportWidth,
         int viewportHeight,
         GLuint voxelShaderProgram,
-        GLuint visibilityProgram,
         float projectionY,
         const Mat4& view,
         const Mat4& viewProjection
@@ -745,7 +690,7 @@ public:
             lastDiagnostics.frameIndex = diagnosticsFrameCounter++;
         }
         if (!geometryArena.isInitialized()) {
-            std::cerr << "GPU traversal unavailable: geometry arena is not initialized.\n";
+            std::cerr << "Geometry arena is not initialized.\n";
             return false;
         }
 
@@ -758,6 +703,25 @@ public:
                 selectHierarchicalNode(pair.second.get(), frustum, cameraPos, projectionScale, selectedChunks);
             }
         }
+        std::sort(
+            selectedChunks.begin(),
+            selectedChunks.end(),
+            [cameraPos](const Chunk* left, const Chunk* right) {
+                auto distanceSquared = [cameraPos](const Chunk* chunk) {
+                    float centerX = static_cast<float>(chunk->worldMin.x) +
+                        static_cast<float>(chunk->worldSize) * 0.5f;
+                    float centerY = static_cast<float>(chunk->worldMin.y) +
+                        static_cast<float>(chunk->worldSize) * 0.5f;
+                    float centerZ = static_cast<float>(chunk->worldMin.z) +
+                        static_cast<float>(chunk->worldSize) * 0.5f;
+                    float dx = centerX - cameraPos.x;
+                    float dy = centerY - cameraPos.y;
+                    float dz = centerZ - cameraPos.z;
+                    return dx * dx + dy * dy + dz * dz;
+                };
+                return distanceSquared(left) < distanceSquared(right);
+            }
+        );
 
         std::vector<SectionGpuMetadata> drawMetadata;
         std::vector<DrawElementsIndirectCommand> drawCommands;
@@ -794,7 +758,7 @@ public:
                 lastDiagnostics.candidateIndices += cmd.count;
                 lastDiagnostics.largestCandidate = std::max(lastDiagnostics.largestCandidate, cmd.count);
             }
-            lastDiagnostics.gpuTraversalVerified = true;
+            lastDiagnostics.cpuTraversalUsed = true;
             lastDiagnostics.commandPayloadValid = true;
         }
 

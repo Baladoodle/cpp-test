@@ -2,14 +2,37 @@
 #define MESH_BUILDER_HPP
 
 #include "Chunk.hpp"
-#include "VoxelMip.hpp"
 #include "Block.hpp"
 #include "MathUtils.hpp"
+#include <array>
 #include <vector>
 #include <queue>
 #include <tuple>
 #include <cstdint>
 #include <algorithm>
+
+struct MeshingNeighborhood {
+    std::array<uint8_t, PADDED_VOL> blocks{};
+    std::array<uint16_t, PADDED_VOL> light{};
+
+    inline uint8_t block(int x, int y, int z) const {
+        if (x < -1 || x > CHUNK_SIZE ||
+            y < -1 || y > CHUNK_SIZE ||
+            z < -1 || z > CHUNK_SIZE) {
+            return BLOCK_AIR;
+        }
+        return blocks[getPaddedVoxelIndex(x, y, z)];
+    }
+
+    inline uint16_t lightAt(int x, int y, int z) const {
+        if (x < -1 || x > CHUNK_SIZE ||
+            y < -1 || y > CHUNK_SIZE ||
+            z < -1 || z > CHUNK_SIZE) {
+            return 0;
+        }
+        return light[getPaddedVoxelIndex(x, y, z)];
+    }
+};
 
 class MeshBuilder {
 private:
@@ -152,9 +175,12 @@ private:
     }
 
 public:
-    // Rebuild the derived border/light state after a section's voxel values
-    // have come from the mip pyramid instead of procedural sampling.
-    static void finalizeVoxelData(Chunk& chunk, const std::vector<float>* densityGrid = nullptr, const VoxelMipStore* mipStore = nullptr) {
+    // rebuild the border and light data used by the worker mesher.
+    static void finalizeVoxelData(
+        Chunk& chunk,
+        const std::vector<float>* densityGrid = nullptr,
+        MeshingNeighborhood* neighborhood = nullptr
+    ) {
         bool hasSolid = false;
         for (int z = 0; z < CHUNK_SIZE && !hasSolid; ++z) {
             for (int y = 0; y < CHUNK_SIZE && !hasSolid; ++y) {
@@ -172,6 +198,10 @@ public:
             threadScratch.paddedBlocks.clear();
             threadScratch.paddedLight.clear();
             std::fill(chunk.light, chunk.light + CHUNK_VOL, 0);
+            if (neighborhood) {
+                neighborhood->blocks.fill(BLOCK_AIR);
+                neighborhood->light.fill(0);
+            }
             chunk.isGenerated = true;
             return;
         }
@@ -226,16 +256,6 @@ public:
                                 wx, wy, wz, scale, density, aboveDensity, above2Density, sharpness
                             );
                         }
-                    } else if (mipStore) {
-                        uint8_t mipBlock = mipStore->readVoxel(chunk.lod, chunk.chunkPos, x, y, z);
-                        if (mipBlock != BLOCK_AIR) {
-                            block = mipBlock;
-                        } else {
-                            int64_t wx = wmx + x * scale + scale / 2;
-                            int64_t wy = wmy + y * scale + scale / 2;
-                            int64_t wz = wmz + z * scale + scale / 2;
-                            block = WorldGen::getBlockAt(wx, wy, wz, scale);
-                        }
                     } else {
                         int64_t wx = wmx + x * scale + scale / 2;
                         int64_t wy = wmy + y * scale + scale / 2;
@@ -247,10 +267,22 @@ public:
             }
         }
         propagateLight3D(chunk);
+        if (neighborhood) {
+            std::copy(
+                threadScratch.paddedBlocks.begin(),
+                threadScratch.paddedBlocks.end(),
+                neighborhood->blocks.begin()
+            );
+            std::copy(
+                threadScratch.paddedLight.begin(),
+                threadScratch.paddedLight.end(),
+                neighborhood->light.begin()
+            );
+        }
         chunk.isGenerated = true;
     }
 
-    static void generateVoxelData(Chunk& chunk) {
+    static void generateVoxelData(Chunk& chunk, MeshingNeighborhood* neighborhood = nullptr) {
         bool hasSolid = false;
         int scale = chunk.scale;
         int64_t wmx = chunk.worldMin.x;
@@ -267,110 +299,19 @@ public:
             return ((y + 1) * GRID_SIZE + (z + 3)) * GRID_SIZE + (x + 3);
         };
 
-        int stride = (scale >= 2) ? 4 : 2;
-
-        // 1. Evaluate density at sampled grid points
-        for (int iy = 0; iy < GRID_SIZE; iy += (iy + stride < GRID_SIZE ? stride : (GRID_SIZE - 1 - iy))) {
-            if (iy >= GRID_SIZE) break;
+        // Evaluate every coarse voxel center so the density field has no
+        // synthetic lattice to imprint on distant terrain.
+        for (int iy = 0; iy < GRID_SIZE; ++iy) {
             int y = iy - 1;
             int64_t wy = wmy + y * scale + scale / 2;
-            for (int iz = 0; iz < GRID_SIZE; iz += (iz + stride < GRID_SIZE ? stride : (GRID_SIZE - 1 - iz))) {
-                if (iz >= GRID_SIZE) break;
+            for (int iz = 0; iz < GRID_SIZE; ++iz) {
                 int z = iz - 3;
                 int64_t wz = wmz + z * scale + scale / 2;
-                for (int ix = 0; ix < GRID_SIZE; ix += (ix + stride < GRID_SIZE ? stride : (GRID_SIZE - 1 - ix))) {
-                    if (ix >= GRID_SIZE) break;
+                for (int ix = 0; ix < GRID_SIZE; ++ix) {
                     int x = ix - 3;
                     int64_t wx = wmx + x * scale + scale / 2;
                     densityGrid[gridIndex(x, y, z)] =
                         WorldGen::getDensity(wx, wy, wz, scale);
-                    if (ix == GRID_SIZE - 1) break;
-                }
-                if (iz == GRID_SIZE - 1) break;
-            }
-            if (iy == GRID_SIZE - 1) break;
-        }
-
-        // 2. Interpolate X coordinates
-        if (stride == 4) {
-            for (int iy = 0; iy < GRID_SIZE; iy += 4) {
-                int cy = iy < 36 ? iy : 38;
-                for (int iz = 0; iz < GRID_SIZE; iz += 4) {
-                    int cz = iz < 36 ? iz : 38;
-                    for (int ix = 2; ix < 36; ix += 4) {
-                        int idx = ((cy * GRID_SIZE) + cz) * GRID_SIZE + ix;
-                        densityGrid[idx] = 0.5f * (densityGrid[idx - 2] + densityGrid[idx + 2]);
-                    }
-                    int idx37 = ((cy * GRID_SIZE) + cz) * GRID_SIZE + 37;
-                    densityGrid[idx37] = 0.5f * (densityGrid[((cy * GRID_SIZE) + cz) * GRID_SIZE + 36] + densityGrid[((cy * GRID_SIZE) + cz) * GRID_SIZE + 38]);
-                }
-            }
-        }
-        for (int iy = 0; iy < GRID_SIZE; iy += stride) {
-            int cy = (stride == 4 && iy >= 36) ? 38 : iy;
-            for (int iz = 0; iz < GRID_SIZE; iz += stride) {
-                int cz = (stride == 4 && iz >= 36) ? 38 : iz;
-                for (int ix = 1; ix < GRID_SIZE - 1; ix += 2) {
-                    int idx = ((cy * GRID_SIZE) + cz) * GRID_SIZE + ix;
-                    densityGrid[idx] = 0.5f * (densityGrid[idx - 1] + densityGrid[idx + 1]);
-                }
-            }
-        }
-
-        // 3. Interpolate Y coordinates
-        if (stride == 4) {
-            for (int iz = 0; iz < GRID_SIZE; iz += 4) {
-                int cz = iz < 36 ? iz : 38;
-                for (int ix = 0; ix < GRID_SIZE; ++ix) {
-                    for (int iy = 2; iy < 36; iy += 4) {
-                        int idx = ((iy * GRID_SIZE) + cz) * GRID_SIZE + ix;
-                        int prev = (((iy - 2) * GRID_SIZE) + cz) * GRID_SIZE + ix;
-                        int next = (((iy + 2) * GRID_SIZE) + cz) * GRID_SIZE + ix;
-                        densityGrid[idx] = 0.5f * (densityGrid[prev] + densityGrid[next]);
-                    }
-                    int idx37 = ((37 * GRID_SIZE) + cz) * GRID_SIZE + ix;
-                    int prev = ((36 * GRID_SIZE) + cz) * GRID_SIZE + ix;
-                    int next = ((38 * GRID_SIZE) + cz) * GRID_SIZE + ix;
-                    densityGrid[idx37] = 0.5f * (densityGrid[prev] + densityGrid[next]);
-                }
-            }
-        }
-        for (int iz = 0; iz < GRID_SIZE; iz += (stride == 4 ? 4 : 2)) {
-            int cz = (stride == 4 && iz >= 36) ? 38 : iz;
-            for (int ix = 0; ix < GRID_SIZE; ++ix) {
-                for (int iy = 1; iy < GRID_SIZE - 1; iy += 2) {
-                    int idx = ((iy * GRID_SIZE) + cz) * GRID_SIZE + ix;
-                    int prev = (((iy - 1) * GRID_SIZE) + cz) * GRID_SIZE + ix;
-                    int next = (((iy + 1) * GRID_SIZE) + cz) * GRID_SIZE + ix;
-                    densityGrid[idx] = 0.5f * (densityGrid[prev] + densityGrid[next]);
-                }
-            }
-        }
-
-        // 4. Interpolate Z coordinates
-        if (stride == 4) {
-            for (int iy = 0; iy < GRID_SIZE; ++iy) {
-                for (int ix = 0; ix < GRID_SIZE; ++ix) {
-                    for (int iz = 2; iz < 36; iz += 4) {
-                        int idx = ((iy * GRID_SIZE) + iz) * GRID_SIZE + ix;
-                        int prev = ((iy * GRID_SIZE) + (iz - 2)) * GRID_SIZE + ix;
-                        int next = ((iy * GRID_SIZE) + (iz + 2)) * GRID_SIZE + ix;
-                        densityGrid[idx] = 0.5f * (densityGrid[prev] + densityGrid[next]);
-                    }
-                    int idx37 = ((iy * GRID_SIZE) + 37) * GRID_SIZE + ix;
-                    int prev = ((iy * GRID_SIZE) + 36) * GRID_SIZE + ix;
-                    int next = ((iy * GRID_SIZE) + 38) * GRID_SIZE + ix;
-                    densityGrid[idx37] = 0.5f * (densityGrid[prev] + densityGrid[next]);
-                }
-            }
-        }
-        for (int iy = 0; iy < GRID_SIZE; ++iy) {
-            for (int ix = 0; ix < GRID_SIZE; ++ix) {
-                for (int iz = 1; iz < GRID_SIZE - 1; iz += 2) {
-                    int idx = ((iy * GRID_SIZE) + iz) * GRID_SIZE + ix;
-                    int prev = ((iy * GRID_SIZE) + (iz - 1)) * GRID_SIZE + ix;
-                    int next = ((iy * GRID_SIZE) + (iz + 1)) * GRID_SIZE + ix;
-                    densityGrid[idx] = 0.5f * (densityGrid[prev] + densityGrid[next]);
                 }
             }
         }
@@ -593,10 +534,10 @@ public:
             }
         }
         // Recompute after lakes/flora have been applied.
-        finalizeVoxelData(chunk, &densityGrid);
+        finalizeVoxelData(chunk, &densityGrid, neighborhood);
     }
 
-    static void buildMesh(Chunk& chunk) {
+    static void buildMesh(Chunk& chunk, const MeshingNeighborhood* neighborhood = nullptr) {
         chunk.stagedIndices.clear();
         chunk.stagedVertices.reserve(8192);
         chunk.stagedIndices.reserve(12288);
@@ -607,21 +548,26 @@ public:
 
         int scale = chunk.scale;
         float fScale = static_cast<float>(scale);
-        float lodLvl = static_cast<float>(chunk.lod);
         int64_t wmx = chunk.worldMin.x;
         int64_t wmy = chunk.worldMin.y;
         int64_t wmz = chunk.worldMin.z;
 
-        // check the cached one-block border instead of regenerating neighbors.
+        auto getNeighborhoodBlock = [&](int x, int y, int z) -> uint8_t {
+            return neighborhood
+                ? neighborhood->block(x, y, z)
+                : chunk.getPaddedBlock(x, y, z);
+        };
+        auto getNeighborhoodLight = [&](int x, int y, int z) -> uint16_t {
+            return neighborhood
+                ? neighborhood->lightAt(x, y, z)
+                : chunk.getPaddedLight(x, y, z);
+        };
         auto isSolidBlock = [&](int x, int y, int z) -> bool {
-            uint8_t b = chunk.getPaddedBlock(x, y, z);
-            const BlockInfo& info = getBlockInfo(b);
+            const BlockInfo& info = getBlockInfo(getNeighborhoodBlock(x, y, z));
             return info.isSolid && !info.isTransparent;
         };
 
-        // Far sections benefit most from merging. Keep leaves, plants, and
-        // fluids on the existing model-aware path; only opaque cubic terrain
-        // is safe to combine into a rectangular face.
+        // only opaque cubic terrain is safe to combine into a rectangle.
         auto isGreedyOpaqueBlock = [&](uint8_t block) -> bool {
             const BlockInfo& info = getBlockInfo(block);
             return block != BLOCK_AIR &&
@@ -629,14 +575,6 @@ public:
                 !isAnyLeaf(block) &&
                 block != BLOCK_TALL_GRASS &&
                 block != BLOCK_TALL_GRASS_TOP;
-        };
-
-        // Lambda to get block light helper
-        auto getLightVal = [&](int x, int y, int z) -> float {
-            if (x >= 0 && x < CHUNK_SIZE && y >= 0 && y < CHUNK_SIZE && z >= 0 && z < CHUNK_SIZE) {
-                return static_cast<float>(chunk.getLight(x, y, z)) / 15.0f;
-            }
-            return 0.0f;
         };
 
         // 6 Cube Face Templates
@@ -726,7 +664,6 @@ public:
                     vert.lightG = static_cast<float>(getLightG(plantL)) / 15.0f;
                     vert.lightB = static_cast<float>(getLightB(plantL)) / 15.0f;
                     vert.skyLight = static_cast<float>(getLightSky(plantL)) / 15.0f;
-                    vert.lodLevel = lodLvl;
                     vert.windWeight = quadWindWeights[c];
                     chunk.stagedVertices.push_back(vert);
                 }
@@ -746,7 +683,7 @@ public:
             appendWinding(reversePositions, -normal, reverseUV, reverseWindWeights);
         };
 
-        if (chunk.lod >= 2) {
+        {
             auto faceCell = [&](int face, int slice, int u, int v) -> IVec3 {
                 switch (face) {
                     case DIR_POS_X:
@@ -823,7 +760,7 @@ public:
                     bool s2 = isSolidBlock(nx, c1y, nz);
                     bool corner = isSolidBlock(c1x, c1y, nz);
 
-                    uint16_t light = chunk.getPaddedLight(nx, ny, nz);
+                    uint16_t light = getNeighborhoodLight(nx, ny, nz);
                     const BlockInfo& info = getBlockInfo(blockType);
                     float lightR = info.lightR > 0 ? static_cast<float>(info.lightR) / 15.0f : static_cast<float>(getLightR(light)) / 15.0f;
                     float lightG = info.lightG > 0 ? static_cast<float>(info.lightG) / 15.0f : static_cast<float>(getLightG(light)) / 15.0f;
@@ -839,15 +776,14 @@ public:
                     vert.nx = faceNormals[face].x;
                     vert.ny = faceNormals[face].y;
                     vert.nz = faceNormals[face].z;
-                    vert.u = tileU0 + cornerU[face][c] * tileSize;
-                    vert.v = tileV0 + cornerV[face][c] * tileSize;
+                    vert.u = tileU0 + cornerU[face][c] * width * tileSize;
+                    vert.v = tileV0 + cornerV[face][c] * height * tileSize;
                     vert.texIndex = static_cast<float>(texTileID);
                     vert.ao = calculateAO(s1, s2, corner);
                     vert.lightR = lightR;
                     vert.lightG = lightG;
                     vert.lightB = lightB;
                     vert.skyLight = skyLight;
-                    vert.lodLevel = lodLvl;
                     vert.windWeight = 0.0f;
                     chunk.stagedVertices.push_back(vert);
                 }
@@ -860,10 +796,47 @@ public:
                 chunk.stagedIndices.push_back(baseIdx + 3);
             };
 
-            std::vector<uint8_t> mask(CHUNK_SIZE * CHUNK_SIZE, BLOCK_AIR);
+            struct GreedyCell {
+                uint8_t block = BLOCK_AIR;
+                uint16_t light = 0;
+                uint8_t aoSignature = 0;
+
+                bool operator==(const GreedyCell& other) const {
+                    return block == other.block &&
+                        light == other.light &&
+                        aoSignature == other.aoSignature;
+                }
+            };
+
+            auto calculateAoSignature = [&](const IVec3& cell, int face) -> uint8_t {
+                uint8_t signature = 0;
+                for (int c = 0; c < 4; ++c) {
+                    Vec3 cornerPos = faceCorners[face][c];
+                    int nx = static_cast<int>(cell.x) + faceOffsetDirs[face][0];
+                    int ny = static_cast<int>(cell.y) + faceOffsetDirs[face][1];
+                    int nz = static_cast<int>(cell.z) + faceOffsetDirs[face][2];
+                    int c1x = static_cast<int>(cell.x) +
+                        static_cast<int>(cornerPos.x) + faceOffsetDirs[face][0];
+                    int c1y = static_cast<int>(cell.y) +
+                        static_cast<int>(cornerPos.y) + faceOffsetDirs[face][1];
+                    int c1z = static_cast<int>(cell.z) +
+                        static_cast<int>(cornerPos.z) + faceOffsetDirs[face][2];
+                    bool side1 = isSolidBlock(c1x, ny, nz);
+                    bool side2 = isSolidBlock(nx, c1y, nz);
+                    bool corner = isSolidBlock(c1x, c1y, nz);
+                    float ao = calculateAO(side1, side2, corner);
+                    uint8_t value = ao <= 0.3f
+                        ? 3
+                        : (ao < 0.7f ? 2 : (ao < 0.9f ? 1 : 0));
+                    signature |= static_cast<uint8_t>(value << (c * 2));
+                }
+                return signature;
+            };
+
+            std::vector<GreedyCell> mask(CHUNK_SIZE * CHUNK_SIZE);
             for (int face = 0; face < 6; ++face) {
                 for (int slice = 0; slice < CHUNK_SIZE; ++slice) {
-                    std::fill(mask.begin(), mask.end(), BLOCK_AIR);
+                    std::fill(mask.begin(), mask.end(), GreedyCell{});
 
                     for (int v = 0; v < CHUNK_SIZE; ++v) {
                         for (int u = 0; u < CHUNK_SIZE; ++u) {
@@ -879,19 +852,23 @@ public:
                             int ny = static_cast<int>(cell.y) + faceOffsetDirs[face][1];
                             int nz = static_cast<int>(cell.z) + faceOffsetDirs[face][2];
                             if (!isSolidBlock(nx, ny, nz)) {
-                                mask[v * CHUNK_SIZE + u] = block;
+                                mask[v * CHUNK_SIZE + u] = {
+                                    block,
+                                    getNeighborhoodLight(nx, ny, nz),
+                                    calculateAoSignature(cell, face)
+                                };
                             }
                         }
                     }
 
                     for (int v = 0; v < CHUNK_SIZE; ++v) {
                         for (int u = 0; u < CHUNK_SIZE; ++u) {
-                            uint8_t block = mask[v * CHUNK_SIZE + u];
-                            if (block == BLOCK_AIR) continue;
+                            GreedyCell cell = mask[v * CHUNK_SIZE + u];
+                            if (cell.block == BLOCK_AIR) continue;
 
                             int width = 1;
                             while (u + width < CHUNK_SIZE &&
-                                   mask[v * CHUNK_SIZE + u + width] == block) {
+                                   mask[v * CHUNK_SIZE + u + width] == cell) {
                                 ++width;
                             }
 
@@ -899,7 +876,7 @@ public:
                             bool canGrow = true;
                             while (v + height < CHUNK_SIZE && canGrow) {
                                 for (int du = 0; du < width; ++du) {
-                                    if (mask[(v + height) * CHUNK_SIZE + u + du] != block) {
+                                    if (mask[(v + height) * CHUNK_SIZE + u + du] != cell) {
                                         canGrow = false;
                                         break;
                                     }
@@ -909,10 +886,10 @@ public:
 
                             for (int dv = 0; dv < height; ++dv) {
                                 for (int du = 0; du < width; ++du) {
-                                    mask[(v + dv) * CHUNK_SIZE + u + du] = BLOCK_AIR;
+                                    mask[(v + dv) * CHUNK_SIZE + u + du] = GreedyCell{};
                                 }
                             }
-                            appendGreedyQuad(block, face, slice, u, v, width, height);
+                            appendGreedyQuad(cell.block, face, slice, u, v, width, height);
                         }
                     }
                 }
@@ -924,8 +901,12 @@ public:
                 for (int x = 0; x < CHUNK_SIZE; ++x) {
                     uint8_t blockType = chunk.getBlock(x, y, z);
                     if (blockType == BLOCK_AIR) continue;
-
-                    if (chunk.lod >= 2 && isGreedyOpaqueBlock(blockType)) {
+                    if (chunk.lod >= 2 &&
+                        (blockType == BLOCK_TALL_GRASS ||
+                         blockType == BLOCK_TALL_GRASS_TOP)) {
+                        continue;
+                    }
+                    if (isGreedyOpaqueBlock(blockType)) {
                         continue;
                     }
 
@@ -1022,7 +1003,7 @@ public:
                             fB = static_cast<float>(bInfo.lightB) / 15.0f;
                             fSky = 0.0f;
                         } else {
-                            uint16_t lVal = chunk.getPaddedLight(nx, ny, nz);
+                            uint16_t lVal = getNeighborhoodLight(nx, ny, nz);
                             fR = static_cast<float>(getLightR(lVal)) / 15.0f;
                             fG = static_cast<float>(getLightG(lVal)) / 15.0f;
                             fB = static_cast<float>(getLightB(lVal)) / 15.0f;
@@ -1063,7 +1044,6 @@ public:
                             vert.lightG = fG;
                             vert.lightB = fB;
                             vert.skyLight = fSky;
-                            vert.lodLevel = lodLvl;
                             vert.windWeight = 0.0f;
 
                             chunk.stagedVertices.push_back(vert);

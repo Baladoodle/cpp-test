@@ -1,0 +1,1 @@
+/usr/bin/c++ -O3 -DNDEBUG -Wl,--dependency-file=CMakeFiles/InfiniteVoxelEngine.dir/link.d CMakeFiles/InfiniteVoxelEngine.dir/src/Main.cpp.o CMakeFiles/InfiniteVoxelEngine.dir/src/SimplexNoise.cpp.o -o InfiniteVoxelEngine  -lglfw -lepoxy /usr/lib/libGLX.so /usr/lib/libOpenGL.so
