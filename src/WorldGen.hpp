@@ -41,8 +41,10 @@ private:
         return sy;
     }
 
-    static inline int64_t getSurfaceYAt(int64_t wx, int64_t wz) {
-        for (int64_t y = 250; y >= -50; y -= 4) {
+    static inline int64_t getSurfaceYAt(int64_t wx, int64_t wz, int64_t minY = -50, int64_t maxY = 250) {
+        int64_t startY = std::min<int64_t>(250, maxY + 4);
+        int64_t stopY = std::max<int64_t>(-50, minY);
+        for (int64_t y = startY; y >= stopY; y -= 4) {
             if (getDensity(wx, y, wz, 1) > 0.0f) {
                 for (int64_t ry = y + 4; ry >= y; --ry) {
                     if (getDensity(wx, ry, wz, 1) > 0.0f && getDensity(wx, ry + 1, wz, 1) <= 0.0f) {
@@ -279,12 +281,10 @@ public:
                 float floraPatchNoise = getFloraPatchNoise(tx, tz);
                 if (lakeNoise >= 0.72f || floraPatchNoise <= 0.40f) continue;
 
-                int64_t groundY = getSurfaceYAtCached(tx, tz);
+                int64_t groundY = getSurfaceYAt(tx, tz, minWY - 30, maxWY);
                 if (groundY <= -900 || maxWY < groundY || minWY > groundY + 30) continue;
 
-                float aboveGroundDensity = getDensity(tx, groundY + 1, tz, 1);
-                float groundDensity = getDensity(tx, groundY, tz, 1);
-                if (groundDensity <= 0.0f || aboveGroundDensity > 0.0f) continue;
+                // groundY from getSurfaceYAt already guarantees groundDensity > 0 and aboveGroundDensity <= 0
 
                 uint64_t seed = treeHash(tx, tz);
                 int roll = static_cast<int>(seed % 100);
@@ -514,8 +514,10 @@ public:
         }
         return BLOCK_AIR;
     }
-    // Anti-aliases high-frequency detail noise for coarse LOD scales (scale > 1)
-    static float getDensity(int64_t wx, int64_t wy, int64_t wz, int scale = 1) {
+    // The base field is shared by terrain and the underside formations below.
+    // Keeping it separate prevents support probes from recursively sampling
+    // the final density field.
+    static float getBaseDensity(int64_t wx, int64_t wy, int64_t wz, int scale = 1) {
         float fx = static_cast<float>(wx);
         float fy = static_cast<float>(wy);
         float fz = static_cast<float>(wz);
@@ -580,6 +582,121 @@ public:
         }
 
         return density;
+    }
+
+    struct StalactiteSite {
+        int64_t x = 0;
+        int64_t z = 0;
+        float radius = 0.0f;
+        float length = 0.0f;
+        float leanX = 0.0f;
+        float leanZ = 0.0f;
+        float strength = 0.0f;
+    };
+
+    static bool getNearestStalactiteSite(int64_t wx, int64_t wz, StalactiteSite& out) {
+        // Jittered cells make broad formations sparse and intentional instead
+        // of turning the entire underside into a noisy curtain.
+        constexpr int64_t cellSize = 14;
+        int64_t cellX = floorDiv(wx, cellSize);
+        int64_t cellZ = floorDiv(wz, cellSize);
+
+        float bestDistanceSq = 1000000.0f;
+        uint64_t bestHash = 0;
+        int64_t bestX = 0;
+        int64_t bestZ = 0;
+
+        for (int dz = -1; dz <= 1; ++dz) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                int64_t candidateCellX = cellX + dx;
+                int64_t candidateCellZ = cellZ + dz;
+                uint64_t hash = treeHash(
+                    candidateCellX + 17321,
+                    candidateCellZ - 9277
+                );
+
+                // Roughly half of the cells contribute a feature. The empty
+                // cells leave exposed stone shelves between the forms.
+                if ((hash % 100ULL) >= 54ULL) continue;
+
+                int64_t candidateX = candidateCellX * cellSize +
+                    2 + static_cast<int64_t>((hash >> 8) % 10ULL);
+                int64_t candidateZ = candidateCellZ * cellSize +
+                    2 + static_cast<int64_t>((hash >> 16) % 10ULL);
+                float dxToSite = static_cast<float>(wx - candidateX);
+                float dzToSite = static_cast<float>(wz - candidateZ);
+                float distanceSq = dxToSite * dxToSite + dzToSite * dzToSite;
+                if (distanceSq < bestDistanceSq) {
+                    bestDistanceSq = distanceSq;
+                    bestHash = hash;
+                    bestX = candidateX;
+                    bestZ = candidateZ;
+                }
+            }
+        }
+
+        if (bestDistanceSq >= 1000000.0f) return false;
+
+        out.x = bestX;
+        out.z = bestZ;
+        out.radius = 3.5f + static_cast<float>((bestHash >> 24) % 40ULL) * 0.10f;
+        out.length = 18.0f + static_cast<float>((bestHash >> 32) % 280ULL) * 0.10f;
+        out.leanX = (static_cast<float>((bestHash >> 42) & 0xFFULL) / 255.0f - 0.5f) * 5.0f;
+        out.leanZ = (static_cast<float>((bestHash >> 50) & 0xFFULL) / 255.0f - 0.5f) * 5.0f;
+        out.strength = 1.15f + static_cast<float>((bestHash >> 58) & 0x3FULL) / 63.0f * 0.85f;
+        return true;
+    }
+
+    // Returns additional solid density for a hanging formation. The support
+    // probe looks upward by the feature's own length, anchoring the cone to a
+    // real underside while its tip fades out naturally.
+    static float getStalactiteDensity(
+        int64_t wx,
+        int64_t wy,
+        int64_t wz,
+        int scale,
+        float baseDensity
+    ) {
+        if (baseDensity > 0.0f) return 0.0f;
+
+        StalactiteSite site;
+        if (!getNearestStalactiteSite(wx, wz, site)) return 0.0f;
+
+        float supportDensity = getBaseDensity(
+            wx,
+            wy + static_cast<int64_t>(std::round(site.length)),
+            wz,
+            scale
+        );
+        float support = std::clamp((supportDensity + 0.18f) / 0.72f, 0.0f, 1.0f);
+        if (support <= 0.0f) return 0.0f;
+
+        float progress = 1.0f - support;
+        float centerX = static_cast<float>(site.x) + site.leanX * progress;
+        float centerZ = static_cast<float>(site.z) + site.leanZ * progress;
+        float radius = site.radius * (0.16f + 0.84f * support);
+        float dx = (static_cast<float>(wx) - centerX) / radius;
+        float dz = (static_cast<float>(wz) - centerZ) / radius;
+        float radial = std::sqrt(dx * dx + dz * dz);
+        float edgeNoise = SimplexNoise::eval3D(
+            static_cast<float>(wx - site.x) * 0.12f,
+            static_cast<float>(wy) * 0.035f,
+            static_cast<float>(wz - site.z) * 0.12f
+        ) * 0.10f;
+        float cone = 1.0f - radial + edgeNoise;
+        if (cone <= 0.0f) return 0.0f;
+
+        float attachment = 0.78f + 0.22f * support;
+        return cone * support * site.strength * attachment;
+    }
+
+    // Anti-aliases high-frequency detail noise for coarse LOD scales (scale > 1)
+    static float getDensity(int64_t wx, int64_t wy, int64_t wz, int scale = 1) {
+        float baseDensity = getBaseDensity(wx, wy, wz, scale);
+        if (baseDensity <= 0.0f) {
+            baseDensity += getStalactiteDensity(wx, wy, wz, scale, baseDensity);
+        }
+        return baseDensity;
     }
 
     // Broad 2D habitat fields used by post-terrain features. Keeping these
@@ -704,6 +821,120 @@ public:
         return transitionNoise < skyBlend;
     }
 
+    // Deep Stone follows local geometric sharpness rather than world height
+    // or random material noise. A broad flat underside has little change in
+    // the horizontal density field, while a cliff edge or narrow tip is dark.
+    static float getDeepStoneSharpness(
+        int64_t wx,
+        int64_t wy,
+        int64_t wz,
+        int scale,
+        float density
+    ) {
+        int64_t nearStep = std::max(1, scale);
+        int64_t farStep = nearStep * 3;
+
+        float nearXPos = getDensity(wx + nearStep, wy, wz, scale);
+        float nearXNeg = getDensity(wx - nearStep, wy, wz, scale);
+        float nearZPos = getDensity(wx, wy, wz + nearStep, scale);
+        float nearZNeg = getDensity(wx, wy, wz - nearStep, scale);
+        float farXPos = getDensity(wx + farStep, wy, wz, scale);
+        float farXNeg = getDensity(wx - farStep, wy, wz, scale);
+        float farZPos = getDensity(wx, wy, wz + farStep, scale);
+        float farZNeg = getDensity(wx, wy, wz - farStep, scale);
+
+        float nearCurvature =
+            std::abs(nearXPos + nearXNeg - 2.0f * density) +
+            std::abs(nearZPos + nearZNeg - 2.0f * density);
+        float farCurvature =
+            std::abs(farXPos + farXNeg - 2.0f * density) +
+            std::abs(farZPos + farZNeg - 2.0f * density);
+        float nearSlope =
+            std::abs(nearXPos - nearXNeg) +
+            std::abs(nearZPos - nearZNeg);
+        float farSlope =
+            std::abs(farXPos - farXNeg) +
+            std::abs(farZPos - farZNeg);
+
+        float sharpness = nearCurvature * 0.55f +
+            farCurvature * 0.30f +
+            nearSlope * 0.10f +
+            farSlope * 0.05f;
+        float transition = std::clamp((sharpness - 0.18f) / 0.82f, 0.0f, 1.0f);
+        return transition * transition * (3.0f - 2.0f * transition);
+    }
+
+    static float getDeepStoneSharpnessFromValues(
+        float density,
+        float nearXPos, float nearXNeg,
+        float nearZPos, float nearZNeg,
+        float farXPos, float farXNeg,
+        float farZPos, float farZNeg
+    ) {
+        float nearCurvature =
+            std::abs(nearXPos + nearXNeg - 2.0f * density) +
+            std::abs(nearZPos + nearZNeg - 2.0f * density);
+        float farCurvature =
+            std::abs(farXPos + farXNeg - 2.0f * density) +
+            std::abs(farZPos + farZNeg - 2.0f * density);
+        float nearSlope =
+            std::abs(nearXPos - nearXNeg) +
+            std::abs(nearZPos - nearZNeg);
+        float farSlope =
+            std::abs(farXPos - farXNeg) +
+            std::abs(farZPos - farZNeg);
+
+        float sharpness = nearCurvature * 0.55f +
+            farCurvature * 0.30f +
+            nearSlope * 0.10f +
+            farSlope * 0.05f;
+        float transition = std::clamp((sharpness - 0.18f) / 0.82f, 0.0f, 1.0f);
+        return transition * transition * (3.0f - 2.0f * transition);
+    }
+
+    static uint8_t getBlockAtWithDensitiesAndSharpness(
+        int64_t wx,
+        int64_t wy,
+        int64_t wz,
+        int scale,
+        float density,
+        float aboveDensity,
+        float above2Density,
+        float sharpness
+    ) {
+        if (density <= 0.0f) return BLOCK_AIR;
+
+        if (isHighSkyZone(wx, wy, wz)) {
+            if (aboveDensity <= 0.0f) return BLOCK_SKY_QUARTZ;
+            if (sharpness > 0.50f) return BLOCK_DEEP_STONE;
+            return BLOCK_STONE;
+        }
+
+        bool isDesert = isDesertZone(wx, wz);
+
+        if (aboveDensity <= 0.0f) {
+            if (isDesert) return BLOCK_SAND;
+            return BLOCK_GRASS;
+        }
+
+        if (above2Density <= 0.0f) {
+            if (isDesert) return BLOCK_SAND;
+            return BLOCK_DIRT;
+        }
+
+        if (scale <= 4) {
+            float crystalNoise = SimplexNoise::eval3D(
+                static_cast<float>(wx) * 0.015f,
+                static_cast<float>(wy) * 0.015f,
+                static_cast<float>(wz) * 0.015f
+            );
+            if (crystalNoise > 0.78f && density < 0.2f) return BLOCK_GLOW_CRYSTAL;
+        }
+
+        if (sharpness > 0.50f) return BLOCK_DEEP_STONE;
+
+        return BLOCK_STONE;
+    }
     // One jittered site per small world cell gives forests an even, natural
     // distribution without the clumping caused by local-noise maxima.
     static bool isTreeSite(int64_t wx, int64_t wz) {
@@ -742,6 +973,9 @@ public:
         // nominal altitude boundary.
         if (isHighSkyZone(wx, wy, wz)) {
             if (aboveDensity <= 0.0f) return BLOCK_SKY_QUARTZ;
+            if (getDeepStoneSharpness(wx, wy, wz, scale, density) > 0.50f) {
+                return BLOCK_DEEP_STONE;
+            }
             return BLOCK_STONE;
         }
 
@@ -770,8 +1004,13 @@ public:
             }
         }
 
+        if (getDeepStoneSharpness(wx, wy, wz, scale, density) > 0.50f) {
+            return BLOCK_DEEP_STONE;
+        }
+
         return BLOCK_STONE;
     }
+
     static uint8_t getBlockAtWithDensities(
         int64_t wx,
         int64_t wy,
@@ -785,6 +1024,9 @@ public:
 
         if (isHighSkyZone(wx, wy, wz)) {
             if (aboveDensity <= 0.0f) return BLOCK_SKY_QUARTZ;
+            if (getDeepStoneSharpness(wx, wy, wz, scale, density) > 0.50f) {
+                return BLOCK_DEEP_STONE;
+            }
             return BLOCK_STONE;
         }
 
@@ -807,6 +1049,10 @@ public:
                 static_cast<float>(wz) * 0.015f
             );
             if (crystalNoise > 0.78f && density < 0.2f) return BLOCK_GLOW_CRYSTAL;
+        }
+
+        if (getDeepStoneSharpness(wx, wy, wz, scale, density) > 0.50f) {
+            return BLOCK_DEEP_STONE;
         }
 
         return BLOCK_STONE;

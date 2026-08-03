@@ -158,7 +158,7 @@ public:
         glDisable(GL_DEPTH_TEST);
 
         shader.use();
-        shader.setVec3("uScreenSize", Vec3(screenW, screenH, 0.0f));
+        shader.setVec2("uScreenSize", screenW, screenH);
 
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, fontTex);

@@ -1,0 +1,173 @@
+#ifndef VOXEL_MIP_HPP
+#define VOXEL_MIP_HPP
+
+#include "Chunk.hpp"
+#include <array>
+#include <cstring>
+#include <mutex>
+#include <unordered_map>
+#include <vector>
+
+// CPU-side storage for the coarse voxel pyramid. Each entry is one 32^3
+// section, matching Chunk's addressing at every LOD. Fine sections publish
+// into their parent; a parent becomes readable only after all eight children
+// have contributed their 16^3 half of the parent section.
+class VoxelMipStore {
+public:
+    static constexpr int NUM_LEVELS = 5;
+
+    struct CompletedSection {
+        int lod = 0;
+        IVec3 chunkPos;
+        uint64_t revision = 0;
+    };
+
+private:
+    struct MipSection {
+        std::array<uint8_t, CHUNK_VOL> blocks{};
+        uint8_t childMask = 0;
+        uint64_t revision = 0;
+    };
+
+    std::unordered_map<IVec3, MipSection, IVec3Hash> levels[NUM_LEVELS];
+    std::vector<CompletedSection> completed;
+    mutable std::mutex mutex;
+
+    static int64_t floorDiv(int64_t value, int64_t divisor) {
+        int64_t result = value / divisor;
+        int64_t remainder = value % divisor;
+        if (remainder != 0 && ((value < 0) ^ (divisor < 0))) {
+            --result;
+        }
+        return result;
+    }
+
+    static uint8_t chooseRepresentative(const uint8_t* childBlocks, int x, int y, int z) {
+        int counts[BLOCK_COUNT] = {};
+        for (int dz = 0; dz < 2; ++dz) {
+            for (int dy = 0; dy < 2; ++dy) {
+                for (int dx = 0; dx < 2; ++dx) {
+                    int index = getVoxelIndex(x * 2 + dx, y * 2 + dy, z * 2 + dz);
+                    uint8_t block = childBlocks[index];
+                    if (block < BLOCK_COUNT) ++counts[block];
+                }
+            }
+        }
+
+        uint8_t best = BLOCK_AIR;
+        for (uint8_t block = 1; block < BLOCK_COUNT; ++block) {
+            if (counts[block] > counts[best] ||
+                (counts[block] == counts[best] && counts[block] > 0 &&
+                 getBlockInfo(block).isSolid && !getBlockInfo(best).isSolid)) {
+                best = block;
+            }
+        }
+        return best;
+    }
+
+    static uint8_t childBit(const IVec3& childPos, const IVec3& parentPos) {
+        int x = static_cast<int>(childPos.x - parentPos.x * 2);
+        int y = static_cast<int>(childPos.y - parentPos.y * 2);
+        int z = static_cast<int>(childPos.z - parentPos.z * 2);
+        return static_cast<uint8_t>(x | (y << 1) | (z << 2));
+    }
+
+    void publishParentUnlocked(int lod, const IVec3& childPos, const uint8_t* childBlocks) {
+        if (lod >= NUM_LEVELS - 1) return;
+
+        IVec3 parentPos(
+            floorDiv(childPos.x, 2),
+            floorDiv(childPos.y, 2),
+            floorDiv(childPos.z, 2)
+        );
+        MipSection& parent = levels[lod + 1][parentPos];
+        uint8_t bit = static_cast<uint8_t>(1u << childBit(childPos, parentPos));
+        bool wasComplete = parent.childMask == 0xFF;
+        if (parent.childMask == 0) {
+            parent.blocks.fill(BLOCK_AIR);
+        }
+
+        for (int z = 0; z < CHUNK_SIZE / 2; ++z) {
+            for (int y = 0; y < CHUNK_SIZE / 2; ++y) {
+                for (int x = 0; x < CHUNK_SIZE / 2; ++x) {
+                    uint8_t block = chooseRepresentative(childBlocks, x, y, z);
+                    int parentX = static_cast<int>((childPos.x - parentPos.x * 2) * (CHUNK_SIZE / 2)) + x;
+                    int parentY = static_cast<int>((childPos.y - parentPos.y * 2) * (CHUNK_SIZE / 2)) + y;
+                    int parentZ = static_cast<int>((childPos.z - parentPos.z * 2) * (CHUNK_SIZE / 2)) + z;
+                    parent.blocks[getVoxelIndex(parentX, parentY, parentZ)] = block;
+                }
+            }
+        }
+
+        parent.childMask = static_cast<uint8_t>(parent.childMask | bit);
+        if (parent.childMask == 0xFF && (!wasComplete || bit != 0)) {
+            ++parent.revision;
+            completed.push_back({lod + 1, parentPos, parent.revision});
+            std::array<uint8_t, CHUNK_VOL> completedBlocks = parent.blocks;
+            publishParentUnlocked(lod + 1, parentPos, completedBlocks.data());
+        }
+    }
+
+public:
+    void publishSection(int lod, const IVec3& chunkPos, const uint8_t* blocks) {
+        if (lod < 0 || lod >= NUM_LEVELS || !blocks) return;
+        std::lock_guard<std::mutex> lock(mutex);
+        publishParentUnlocked(lod, chunkPos, blocks);
+    }
+
+    bool readCompleteSection(
+        int lod,
+        const IVec3& chunkPos,
+        uint8_t* blocks,
+        uint64_t* revision = nullptr
+    ) const {
+        if (lod <= 0 || lod >= NUM_LEVELS || !blocks) return false;
+        std::lock_guard<std::mutex> lock(mutex);
+        auto it = levels[lod].find(chunkPos);
+        if (it == levels[lod].end() || it->second.childMask != 0xFF) return false;
+        std::memcpy(blocks, it->second.blocks.data(), CHUNK_VOL * sizeof(uint8_t));
+        if (revision) *revision = it->second.revision;
+        return true;
+    }
+
+    std::vector<CompletedSection> drainCompleted() {
+        std::lock_guard<std::mutex> lock(mutex);
+        std::vector<CompletedSection> result;
+        result.swap(completed);
+        return result;
+    }
+
+    void requeueCompleted(const CompletedSection& section) {
+        std::lock_guard<std::mutex> lock(mutex);
+        completed.push_back(section);
+    }
+
+    void prune(const Vec3& cameraPos) {
+        constexpr size_t MAX_SECTIONS_PER_LEVEL = 1024;
+        std::lock_guard<std::mutex> lock(mutex);
+        for (int lod = 1; lod < NUM_LEVELS; ++lod) {
+            while (levels[lod].size() > MAX_SECTIONS_PER_LEVEL) {
+                auto farthest = levels[lod].end();
+                float farthestDistance = -1.0f;
+                float sectionSize = static_cast<float>(CHUNK_SIZE * (1 << lod));
+                for (auto it = levels[lod].begin(); it != levels[lod].end(); ++it) {
+                    float centerX = static_cast<float>(it->first.x) * sectionSize + sectionSize * 0.5f;
+                    float centerY = static_cast<float>(it->first.y) * sectionSize + sectionSize * 0.5f;
+                    float centerZ = static_cast<float>(it->first.z) * sectionSize + sectionSize * 0.5f;
+                    float dx = centerX - cameraPos.x;
+                    float dy = centerY - cameraPos.y;
+                    float dz = centerZ - cameraPos.z;
+                    float distance = dx * dx + dy * dy + dz * dz;
+                    if (distance > farthestDistance) {
+                        farthestDistance = distance;
+                        farthest = it;
+                    }
+                }
+                if (farthest == levels[lod].end()) break;
+                levels[lod].erase(farthest);
+            }
+        }
+    }
+};
+
+#endif // VOXEL_MIP_HPP

@@ -19,6 +19,7 @@ enum BlockType : uint8_t {
     BLOCK_LEAVES_WARM = 12,
     BLOCK_TALL_GRASS = 13,
     BLOCK_TALL_GRASS_TOP = 14,
+    BLOCK_DEEP_STONE = 15,
     BLOCK_COUNT
 };
 
@@ -60,7 +61,8 @@ inline const BlockInfo& getBlockInfo(uint8_t type) {
         { "Dark Oak Leaves", true,  true,  0,  0,  0, 19, 19, 19 },
         { "Warm Oak Leaves", true,  true,  0,  0,  0, 23, 23, 23 },
         { "Tall Grass",      false, true,  0,  0,  0, 29, 29, 29 },
-        { "Tall Grass Top",  false, true,  0,  0,  0, 32, 32, 32 }
+        { "Tall Grass Top",  false, true,  0,  0,  0, 32, 32, 32 },
+        { "Deep Stone",      true,  false, 0,  0,  0, 58, 58, 58 }
     };
     if (type >= BLOCK_COUNT) return infos[0];
     return infos[type];

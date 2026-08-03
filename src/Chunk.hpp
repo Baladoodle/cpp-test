@@ -49,6 +49,9 @@ struct Chunk {
     std::atomic<bool> isMeshStaged{false};
     std::atomic<bool> isMeshUploaded{false};
     std::atomic<bool> isPendingWork{true};
+    std::atomic<bool> mipRemeshQueued{false};
+    std::atomic<uint64_t> workToken{0};
+    std::atomic<uint64_t> mipRevision{0};
     bool isFullyCovered = false;
 
     // Staging mesh data built on background thread

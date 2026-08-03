@@ -90,7 +90,7 @@ public:
         };
 
         // Generate each 16x16 tile
-        for (int tileID = 0; tileID < 58; ++tileID) {
+        for (int tileID = 0; tileID < 59; ++tileID) {
             int startX = (tileID % TILES_PER_ROW) * TILE_SIZE;
             int startY = (tileID / TILES_PER_ROW) * TILE_SIZE;
 
@@ -132,6 +132,18 @@ public:
                         case 3: { // Stone
                             uint8_t val = (uint8_t)std::clamp(120.0f + n * 50.0f, 0.0f, 255.0f);
                             setPixel(ax, ay, val, val, val);
+                            break;
+                        }
+                        case 58: { // Deep Stone
+                            // A cool, darker slate gives the underside a
+                            // readable material gradient without relying on
+                            // shader-only color tricks.
+                            float vertical = static_cast<float>(py) / 15.0f;
+                            float vein = ((px * 5 + py * 3) % 11 == 0) ? 1.0f : 0.0f;
+                            uint8_t r = (uint8_t)std::clamp(55.0f + vertical * 10.0f + n * 30.0f + vein * 16.0f, 0.0f, 255.0f);
+                            uint8_t g = (uint8_t)std::clamp(64.0f + vertical * 12.0f + n * 32.0f + vein * 18.0f, 0.0f, 255.0f);
+                            uint8_t b = (uint8_t)std::clamp(70.0f + vertical * 14.0f + n * 36.0f + vein * 22.0f, 0.0f, 255.0f);
+                            setPixel(ax, ay, r, g, b);
                             break;
                         }
                         case 4: { // Glow Crystal

@@ -8,14 +8,14 @@
 class SimplexNoise {
 private:
     static const uint8_t perm[512];
-    static const int grad3[16][3];
+    static const float grad3[16][3];
 
     static inline int fastfloor(float x) {
         int xi = (int)x;
         return x < xi ? xi - 1 : xi;
     }
 
-    static inline float dot(const int g[3], float x, float y, float z) {
+    static inline float dot(const float g[3], float x, float y, float z) {
         return g[0] * x + g[1] * y + g[2] * z;
     }
 
@@ -69,7 +69,7 @@ public:
         if (t0 < 0) n0 = 0.0f;
         else {
             t0 *= t0;
-            int gi0 = perm[ii + perm[jj + perm[kk]]] % 16;
+            int gi0 = perm[ii + perm[jj + perm[kk]]] & 15;
             n0 = t0 * t0 * dot(grad3[gi0], x0, y0, z0);
         }
 
@@ -77,7 +77,7 @@ public:
         if (t1 < 0) n1 = 0.0f;
         else {
             t1 *= t1;
-            int gi1 = perm[ii+i1 + perm[jj+j1 + perm[kk+k1]]] % 16;
+            int gi1 = perm[ii+i1 + perm[jj+j1 + perm[kk+k1]]] & 15;
             n1 = t1 * t1 * dot(grad3[gi1], x1, y1, z1);
         }
 
@@ -85,7 +85,7 @@ public:
         if (t2 < 0) n2 = 0.0f;
         else {
             t2 *= t2;
-            int gi2 = perm[ii+i2 + perm[jj+j2 + perm[kk+k2]]] % 16;
+            int gi2 = perm[ii+i2 + perm[jj+j2 + perm[kk+k2]]] & 15;
             n2 = t2 * t2 * dot(grad3[gi2], x2, y2, z2);
         }
 
@@ -93,7 +93,7 @@ public:
         if (t3 < 0) n3 = 0.0f;
         else {
             t3 *= t3;
-            int gi3 = perm[ii+1 + perm[jj+1 + perm[kk+1]]] % 16;
+            int gi3 = perm[ii+1 + perm[jj+1 + perm[kk+1]]] & 15;
             n3 = t3 * t3 * dot(grad3[gi3], x3, y3, z3);
         }
 

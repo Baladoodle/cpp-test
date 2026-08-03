@@ -22,8 +22,9 @@ private:
 
         chunk.paddedLight.assign(PADDED_VOL, 0);
 
-        std::queue<LightNode> lightQueue;
-
+        thread_local std::vector<LightNode> lightQueue;
+        lightQueue.clear();
+        lightQueue.reserve(4096);
         for (int z = -1; z <= CHUNK_SIZE; ++z) {
             for (int x = -1; x <= CHUNK_SIZE; ++x) {
                 uint8_t topBlock = chunk.getPaddedBlock(x, CHUNK_SIZE, z);
@@ -55,7 +56,7 @@ private:
 
                     if (r > 0 || g > 0 || b > 0 || sky > 0) {
                         chunk.setPaddedLight(x, y, z, packLight(r, g, b, sky));
-                        lightQueue.push({static_cast<int8_t>(x), static_cast<int8_t>(y), static_cast<int8_t>(z)});
+                        lightQueue.push_back({static_cast<int8_t>(x), static_cast<int8_t>(y), static_cast<int8_t>(z)});
                     }
                 }
             }
@@ -65,10 +66,9 @@ private:
         const int dy[6] = { 0,  0,  1, -1,  0,  0 };
         const int dz[6] = { 0,  0,  0,  0,  1, -1 };
 
-        while (!lightQueue.empty()) {
-            LightNode curr = lightQueue.front();
-            lightQueue.pop();
-
+        size_t head = 0;
+        while (head < lightQueue.size()) {
+            LightNode curr = lightQueue[head++];
             uint16_t currLight = chunk.getPaddedLight(curr.x, curr.y, curr.z);
             uint8_t cr = getLightR(currLight);
             uint8_t cg = getLightG(currLight);
@@ -105,7 +105,7 @@ private:
 
                 if (updated) {
                     chunk.setPaddedLight(nx, ny, nz, packLight(nr, ng, nb, nsky));
-                    lightQueue.push({static_cast<int8_t>(nx), static_cast<int8_t>(ny), static_cast<int8_t>(nz)});
+                    lightQueue.push_back({static_cast<int8_t>(nx), static_cast<int8_t>(ny), static_cast<int8_t>(nz)});
                 }
             }
         }
@@ -127,6 +127,94 @@ private:
     }
 
 public:
+    // Rebuild the derived border/light state after a section's voxel values
+    // have come from the mip pyramid instead of procedural sampling.
+    static void finalizeVoxelData(Chunk& chunk, const std::vector<float>* densityGrid = nullptr) {
+        bool hasSolid = false;
+        for (int z = 0; z < CHUNK_SIZE && !hasSolid; ++z) {
+            for (int y = 0; y < CHUNK_SIZE && !hasSolid; ++y) {
+                for (int x = 0; x < CHUNK_SIZE; ++x) {
+                    if (chunk.getBlock(x, y, z) != BLOCK_AIR) {
+                        hasSolid = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        chunk.isEmpty = !hasSolid;
+        if (chunk.isEmpty) {
+            chunk.paddedBlocks.clear();
+            chunk.paddedLight.clear();
+            std::fill(chunk.light, chunk.light + CHUNK_VOL, 0);
+            chunk.isGenerated = true;
+            return;
+        }
+
+        int scale = chunk.scale;
+        int64_t wmx = chunk.worldMin.x;
+        int64_t wmy = chunk.worldMin.y;
+        int64_t wmz = chunk.worldMin.z;
+        chunk.paddedBlocks.resize(PADDED_VOL);
+
+        constexpr int GRID_DX = CHUNK_SIZE + 7; // 39
+        constexpr int GRID_DZ = CHUNK_SIZE + 7; // 39
+        auto gridIndex = [](int x, int y, int z) {
+            return ((y + 1) * GRID_DZ + (z + 3)) * GRID_DX + (x + 3);
+        };
+
+        for (int y = -1; y <= CHUNK_SIZE; ++y) {
+            for (int z = -1; z <= CHUNK_SIZE; ++z) {
+                for (int x = -1; x <= CHUNK_SIZE; ++x) {
+                    uint8_t block = BLOCK_AIR;
+                    bool inside = x >= 0 && x < CHUNK_SIZE &&
+                        y >= 0 && y < CHUNK_SIZE &&
+                        z >= 0 && z < CHUNK_SIZE;
+                    if (inside) {
+                        block = chunk.getBlock(x, y, z);
+                    } else if (densityGrid) {
+                        float density = (*densityGrid)[gridIndex(x, y, z)];
+                        if (density <= 0.0f) {
+                            block = BLOCK_AIR;
+                        } else {
+                            float aboveDensity = (*densityGrid)[gridIndex(x, y + 1, z)];
+                            float above2Density = (*densityGrid)[gridIndex(x, y + 4, z)];
+
+                            float nearXPos = (*densityGrid)[gridIndex(x + 1, y, z)];
+                            float nearXNeg = (*densityGrid)[gridIndex(x - 1, y, z)];
+                            float nearZPos = (*densityGrid)[gridIndex(x, y, z + 1)];
+                            float nearZNeg = (*densityGrid)[gridIndex(x, y, z - 1)];
+                            float farXPos = (*densityGrid)[gridIndex(x + 3, y, z)];
+                            float farXNeg = (*densityGrid)[gridIndex(x - 3, y, z)];
+                            float farZPos = (*densityGrid)[gridIndex(x, y, z + 3)];
+                            float farZNeg = (*densityGrid)[gridIndex(x, y, z - 3)];
+
+                            float sharpness = WorldGen::getDeepStoneSharpnessFromValues(
+                                density, nearXPos, nearXNeg, nearZPos, nearZNeg,
+                                farXPos, farXNeg, farZPos, farZNeg
+                            );
+
+                            int64_t wx = wmx + x * scale + scale / 2;
+                            int64_t wy = wmy + y * scale + scale / 2;
+                            int64_t wz = wmz + z * scale + scale / 2;
+                            block = WorldGen::getBlockAtWithDensitiesAndSharpness(
+                                wx, wy, wz, scale, density, aboveDensity, above2Density, sharpness
+                            );
+                        }
+                    } else {
+                        int64_t wx = wmx + x * scale + scale / 2;
+                        int64_t wy = wmy + y * scale + scale / 2;
+                        int64_t wz = wmz + z * scale + scale / 2;
+                        block = WorldGen::getBlockAt(wx, wy, wz, scale);
+                    }
+                    chunk.paddedBlocks[getPaddedVoxelIndex(x, y, z)] = block;
+                }
+            }
+        }
+        propagateLight3D(chunk);
+        chunk.isGenerated = true;
+    }
+
     static void generateVoxelData(Chunk& chunk) {
         bool hasSolid = false;
         int scale = chunk.scale;
@@ -134,26 +222,123 @@ public:
         int64_t wmy = chunk.worldMin.y;
         int64_t wmz = chunk.worldMin.z;
 
-        constexpr int DENSITY_HEIGHT = CHUNK_SIZE + 4;
-        thread_local std::vector<float> densityGrid;
-        densityGrid.resize(DENSITY_HEIGHT * CHUNK_SIZE * CHUNK_SIZE);
+        constexpr int GRID_SIZE = 39; // ix, iy, iz: 0 to 38
+        constexpr int GRID_VOL = GRID_SIZE * GRID_SIZE * GRID_SIZE; // 59,319
 
-        auto densityIndex = [](int x, int y, int z) {
-            return (y * CHUNK_SIZE + z) * CHUNK_SIZE + x;
+        thread_local std::vector<float> densityGrid;
+        densityGrid.resize(GRID_VOL);
+
+        auto gridIndex = [](int x, int y, int z) {
+            return ((y + 1) * GRID_SIZE + (z + 3)) * GRID_SIZE + (x + 3);
         };
 
-        for (int y = 0; y < DENSITY_HEIGHT; ++y) {
-            for (int z = 0; z < CHUNK_SIZE; ++z) {
-                for (int x = 0; x < CHUNK_SIZE; ++x) {
+        int stride = (scale >= 2) ? 4 : 2;
+
+        // 1. Evaluate density at sampled grid points
+        for (int iy = 0; iy < GRID_SIZE; iy += (iy + stride < GRID_SIZE ? stride : (GRID_SIZE - 1 - iy))) {
+            if (iy >= GRID_SIZE) break;
+            int y = iy - 1;
+            int64_t wy = wmy + y * scale + scale / 2;
+            for (int iz = 0; iz < GRID_SIZE; iz += (iz + stride < GRID_SIZE ? stride : (GRID_SIZE - 1 - iz))) {
+                if (iz >= GRID_SIZE) break;
+                int z = iz - 3;
+                int64_t wz = wmz + z * scale + scale / 2;
+                for (int ix = 0; ix < GRID_SIZE; ix += (ix + stride < GRID_SIZE ? stride : (GRID_SIZE - 1 - ix))) {
+                    if (ix >= GRID_SIZE) break;
+                    int x = ix - 3;
                     int64_t wx = wmx + x * scale + scale / 2;
-                    int64_t wy = wmy + y * scale + scale / 2;
-                    int64_t wz = wmz + z * scale + scale / 2;
-                    densityGrid[densityIndex(x, y, z)] =
+                    densityGrid[gridIndex(x, y, z)] =
                         WorldGen::getDensity(wx, wy, wz, scale);
+                    if (ix == GRID_SIZE - 1) break;
+                }
+                if (iz == GRID_SIZE - 1) break;
+            }
+            if (iy == GRID_SIZE - 1) break;
+        }
+
+        // 2. Interpolate X coordinates
+        if (stride == 4) {
+            for (int iy = 0; iy < GRID_SIZE; iy += 4) {
+                int cy = iy < 36 ? iy : 38;
+                for (int iz = 0; iz < GRID_SIZE; iz += 4) {
+                    int cz = iz < 36 ? iz : 38;
+                    for (int ix = 2; ix < 36; ix += 4) {
+                        int idx = ((cy * GRID_SIZE) + cz) * GRID_SIZE + ix;
+                        densityGrid[idx] = 0.5f * (densityGrid[idx - 2] + densityGrid[idx + 2]);
+                    }
+                    int idx37 = ((cy * GRID_SIZE) + cz) * GRID_SIZE + 37;
+                    densityGrid[idx37] = 0.5f * (densityGrid[((cy * GRID_SIZE) + cz) * GRID_SIZE + 36] + densityGrid[((cy * GRID_SIZE) + cz) * GRID_SIZE + 38]);
+                }
+            }
+        }
+        for (int iy = 0; iy < GRID_SIZE; iy += stride) {
+            int cy = (stride == 4 && iy >= 36) ? 38 : iy;
+            for (int iz = 0; iz < GRID_SIZE; iz += stride) {
+                int cz = (stride == 4 && iz >= 36) ? 38 : iz;
+                for (int ix = 1; ix < GRID_SIZE - 1; ix += 2) {
+                    int idx = ((cy * GRID_SIZE) + cz) * GRID_SIZE + ix;
+                    densityGrid[idx] = 0.5f * (densityGrid[idx - 1] + densityGrid[idx + 1]);
                 }
             }
         }
 
+        // 3. Interpolate Y coordinates
+        if (stride == 4) {
+            for (int iz = 0; iz < GRID_SIZE; iz += 4) {
+                int cz = iz < 36 ? iz : 38;
+                for (int ix = 0; ix < GRID_SIZE; ++ix) {
+                    for (int iy = 2; iy < 36; iy += 4) {
+                        int idx = ((iy * GRID_SIZE) + cz) * GRID_SIZE + ix;
+                        int prev = (((iy - 2) * GRID_SIZE) + cz) * GRID_SIZE + ix;
+                        int next = (((iy + 2) * GRID_SIZE) + cz) * GRID_SIZE + ix;
+                        densityGrid[idx] = 0.5f * (densityGrid[prev] + densityGrid[next]);
+                    }
+                    int idx37 = ((37 * GRID_SIZE) + cz) * GRID_SIZE + ix;
+                    int prev = ((36 * GRID_SIZE) + cz) * GRID_SIZE + ix;
+                    int next = ((38 * GRID_SIZE) + cz) * GRID_SIZE + ix;
+                    densityGrid[idx37] = 0.5f * (densityGrid[prev] + densityGrid[next]);
+                }
+            }
+        }
+        for (int iz = 0; iz < GRID_SIZE; iz += (stride == 4 ? 4 : 2)) {
+            int cz = (stride == 4 && iz >= 36) ? 38 : iz;
+            for (int ix = 0; ix < GRID_SIZE; ++ix) {
+                for (int iy = 1; iy < GRID_SIZE - 1; iy += 2) {
+                    int idx = ((iy * GRID_SIZE) + cz) * GRID_SIZE + ix;
+                    int prev = (((iy - 1) * GRID_SIZE) + cz) * GRID_SIZE + ix;
+                    int next = (((iy + 1) * GRID_SIZE) + cz) * GRID_SIZE + ix;
+                    densityGrid[idx] = 0.5f * (densityGrid[prev] + densityGrid[next]);
+                }
+            }
+        }
+
+        // 4. Interpolate Z coordinates
+        if (stride == 4) {
+            for (int iy = 0; iy < GRID_SIZE; ++iy) {
+                for (int ix = 0; ix < GRID_SIZE; ++ix) {
+                    for (int iz = 2; iz < 36; iz += 4) {
+                        int idx = ((iy * GRID_SIZE) + iz) * GRID_SIZE + ix;
+                        int prev = ((iy * GRID_SIZE) + (iz - 2)) * GRID_SIZE + ix;
+                        int next = ((iy * GRID_SIZE) + (iz + 2)) * GRID_SIZE + ix;
+                        densityGrid[idx] = 0.5f * (densityGrid[prev] + densityGrid[next]);
+                    }
+                    int idx37 = ((iy * GRID_SIZE) + 37) * GRID_SIZE + ix;
+                    int prev = ((iy * GRID_SIZE) + 36) * GRID_SIZE + ix;
+                    int next = ((iy * GRID_SIZE) + 38) * GRID_SIZE + ix;
+                    densityGrid[idx37] = 0.5f * (densityGrid[prev] + densityGrid[next]);
+                }
+            }
+        }
+        for (int iy = 0; iy < GRID_SIZE; ++iy) {
+            for (int ix = 0; ix < GRID_SIZE; ++ix) {
+                for (int iz = 1; iz < GRID_SIZE - 1; iz += 2) {
+                    int idx = ((iy * GRID_SIZE) + iz) * GRID_SIZE + ix;
+                    int prev = ((iy * GRID_SIZE) + (iz - 1)) * GRID_SIZE + ix;
+                    int next = ((iy * GRID_SIZE) + (iz + 1)) * GRID_SIZE + ix;
+                    densityGrid[idx] = 0.5f * (densityGrid[prev] + densityGrid[next]);
+                }
+            }
+        }
         int64_t minSampleX = wmx + scale / 2;
         int64_t maxSampleX = wmx + (CHUNK_SIZE - 1) * scale + scale / 2;
         int64_t minSampleY = wmy + scale / 2;
@@ -178,12 +363,30 @@ public:
                     int64_t wx = wmx + x * scale + scale / 2;
                     int64_t wy = wmy + y * scale + scale / 2;
                     int64_t wz = wmz + z * scale + scale / 2;
-                    float density = densityGrid[densityIndex(x, y, z)];
-                    float aboveDensity = densityGrid[densityIndex(x, y + 1, z)];
-                    float above2Density = densityGrid[densityIndex(x, y + 4, z)];
+                    float density = densityGrid[gridIndex(x, y, z)];
+                    if (density <= 0.0f) {
+                        chunk.setBlock(x, y, z, BLOCK_AIR);
+                        continue;
+                    }
+                    float aboveDensity = densityGrid[gridIndex(x, y + 1, z)];
+                    float above2Density = densityGrid[gridIndex(x, y + 4, z)];
 
-                    uint8_t block = WorldGen::getBlockAtWithDensities(
-                        wx, wy, wz, scale, density, aboveDensity, above2Density
+                    float nearXPos = densityGrid[gridIndex(x + 1, y, z)];
+                    float nearXNeg = densityGrid[gridIndex(x - 1, y, z)];
+                    float nearZPos = densityGrid[gridIndex(x, y, z + 1)];
+                    float nearZNeg = densityGrid[gridIndex(x, y, z - 1)];
+                    float farXPos = densityGrid[gridIndex(x + 3, y, z)];
+                    float farXNeg = densityGrid[gridIndex(x - 3, y, z)];
+                    float farZPos = densityGrid[gridIndex(x, y, z + 3)];
+                    float farZNeg = densityGrid[gridIndex(x, y, z - 3)];
+
+                    float sharpness = WorldGen::getDeepStoneSharpnessFromValues(
+                        density, nearXPos, nearXNeg, nearZPos, nearZNeg,
+                        farXPos, farXNeg, farZPos, farZNeg
+                    );
+
+                    uint8_t block = WorldGen::getBlockAtWithDensitiesAndSharpness(
+                        wx, wy, wz, scale, density, aboveDensity, above2Density, sharpness
                     );
                     chunk.setBlock(x, y, z, block);
 
@@ -197,7 +400,7 @@ public:
         for (int z = 0; z < CHUNK_SIZE; ++z) {
             for (int y = 0; y < CHUNK_SIZE; ++y) {
                 for (int x = 0; x < CHUNK_SIZE; ++x) {
-                    if (densityGrid[densityIndex(x, y, z)] > 0.0f) continue;
+                    if (densityGrid[gridIndex(x, y, z)] > 0.0f) continue;
                     int64_t wx = wmx + x * scale + scale / 2;
                     int64_t wy = wmy + y * scale + scale / 2;
                     int64_t wz = wmz + z * scale + scale / 2;
@@ -355,42 +558,7 @@ public:
             }
         }
         // Recompute after lakes/flora have been applied.
-        hasSolid = false;
-        for (int z = 0; z < CHUNK_SIZE && !hasSolid; ++z) {
-            for (int y = 0; y < CHUNK_SIZE && !hasSolid; ++y) {
-                for (int x = 0; x < CHUNK_SIZE; ++x) {
-                    if (chunk.getBlock(x, y, z) != BLOCK_AIR) {
-                        hasSolid = true;
-                        break;
-                    }
-                }
-            }
-        }
-        chunk.isEmpty = !hasSolid;
-        if (!chunk.isEmpty) {
-            chunk.paddedBlocks.resize(PADDED_VOL);
-            for (int y = -1; y <= CHUNK_SIZE; ++y) {
-                for (int z = -1; z <= CHUNK_SIZE; ++z) {
-                    for (int x = -1; x <= CHUNK_SIZE; ++x) {
-                        uint8_t block = BLOCK_AIR;
-                        bool inside = x >= 0 && x < CHUNK_SIZE &&
-                            y >= 0 && y < CHUNK_SIZE &&
-                            z >= 0 && z < CHUNK_SIZE;
-                        if (inside) {
-                            block = chunk.getBlock(x, y, z);
-                        } else {
-                            int64_t wx = wmx + x * scale + scale / 2;
-                            int64_t wy = wmy + y * scale + scale / 2;
-                            int64_t wz = wmz + z * scale + scale / 2;
-                            block = WorldGen::getBlockAt(wx, wy, wz, scale);
-                        }
-                        chunk.paddedBlocks[getPaddedVoxelIndex(x, y, z)] = block;
-                    }
-                }
-            }
-            propagateLight3D(chunk);
-        }
-        chunk.isGenerated = true;
+        finalizeVoxelData(chunk, &densityGrid);
     }
 
     static void buildMesh(Chunk& chunk) {
@@ -414,6 +582,18 @@ public:
             uint8_t b = chunk.getPaddedBlock(x, y, z);
             const BlockInfo& info = getBlockInfo(b);
             return info.isSolid && !info.isTransparent;
+        };
+
+        // Far sections benefit most from merging. Keep leaves, plants, and
+        // fluids on the existing model-aware path; only opaque cubic terrain
+        // is safe to combine into a rectangular face.
+        auto isGreedyOpaqueBlock = [&](uint8_t block) -> bool {
+            const BlockInfo& info = getBlockInfo(block);
+            return block != BLOCK_AIR &&
+                info.isSolid && !info.isTransparent &&
+                !isAnyLeaf(block) &&
+                block != BLOCK_TALL_GRASS &&
+                block != BLOCK_TALL_GRASS_TOP;
         };
 
         // Lambda to get block light helper
@@ -531,11 +711,188 @@ public:
             appendWinding(reversePositions, -normal, reverseUV, reverseWindWeights);
         };
 
+        if (chunk.lod >= 2) {
+            auto faceCell = [&](int face, int slice, int u, int v) -> IVec3 {
+                switch (face) {
+                    case DIR_POS_X:
+                    case DIR_NEG_X: return IVec3(slice, v, u); // u=Z, v=Y
+                    case DIR_POS_Y:
+                    case DIR_NEG_Y: return IVec3(u, slice, v); // u=X, v=Z
+                    default: return IVec3(u, v, slice);         // u=X, v=Y
+                }
+            };
+
+            auto facePosition = [&](int face, int slice, int u, int v) -> Vec3 {
+                switch (face) {
+                    case DIR_POS_X: return Vec3(slice + 1.0f, v, u);
+                    case DIR_NEG_X: return Vec3(slice, v, u);
+                    case DIR_POS_Y: return Vec3(u, slice + 1.0f, v);
+                    case DIR_NEG_Y: return Vec3(u, slice, v);
+                    case DIR_POS_Z: return Vec3(u, v, slice + 1.0f);
+                    default: return Vec3(u, v, slice);
+                }
+            };
+
+            auto localFaceCorner = [&](int face, int localU, int localV) -> Vec3 {
+                float normalSide = (face % 2 == 0) ? 1.0f : 0.0f;
+                switch (face) {
+                    case DIR_POS_X:
+                    case DIR_NEG_X: return Vec3(normalSide, localV, localU);
+                    case DIR_POS_Y:
+                    case DIR_NEG_Y: return Vec3(localU, normalSide, localV);
+                    default: return Vec3(localU, localV, normalSide);
+                }
+            };
+
+            // Corner ordering matches faceCorners above, so winding, AO, and
+            // texture orientation stay consistent with the legacy mesher.
+            const int cornerU[6][4] = {
+                {0, 0, 1, 1}, {1, 1, 0, 0},
+                {0, 1, 1, 0}, {0, 1, 1, 0},
+                {1, 1, 0, 0}, {0, 0, 1, 1}
+            };
+            const int cornerV[6][4] = {
+                {0, 1, 1, 0}, {0, 1, 1, 0},
+                {1, 1, 0, 0}, {0, 0, 1, 1},
+                {0, 1, 1, 0}, {0, 1, 1, 0}
+            };
+
+            auto appendGreedyQuad = [&](uint8_t blockType, int face, int slice,
+                                        int u0, int v0, int width, int height) {
+                uint8_t texTileID = getBlockTextureIndex(blockType, face);
+                float tileU0 = (texTileID % 16) / 16.0f;
+                float tileV0 = (texTileID / 16) / 16.0f;
+                float tileSize = 1.0f / 16.0f;
+                uint32_t baseIdx = static_cast<uint32_t>(chunk.stagedVertices.size());
+
+                for (int c = 0; c < 4; ++c) {
+                    int uBoundary = u0 + (cornerU[face][c] ? width : 0);
+                    int vBoundary = v0 + (cornerV[face][c] ? height : 0);
+                    Vec3 position = facePosition(face, slice, uBoundary, vBoundary);
+
+                    int cellU = cornerU[face][c] ? uBoundary - 1 : uBoundary;
+                    int cellV = cornerV[face][c] ? vBoundary - 1 : vBoundary;
+                    IVec3 cell = faceCell(face, slice, cellU, cellV);
+                    Vec3 cornerPos = localFaceCorner(
+                        face,
+                        cornerU[face][c],
+                        cornerV[face][c]
+                    );
+                    int nx = static_cast<int>(cell.x) + faceOffsetDirs[face][0];
+                    int ny = static_cast<int>(cell.y) + faceOffsetDirs[face][1];
+                    int nz = static_cast<int>(cell.z) + faceOffsetDirs[face][2];
+                    int c1x = static_cast<int>(cell.x) + static_cast<int>(cornerPos.x) + faceOffsetDirs[face][0];
+                    int c1y = static_cast<int>(cell.y) + static_cast<int>(cornerPos.y) + faceOffsetDirs[face][1];
+                    int c1z = static_cast<int>(cell.z) + static_cast<int>(cornerPos.z) + faceOffsetDirs[face][2];
+                    bool s1 = isSolidBlock(c1x, ny, nz);
+                    bool s2 = isSolidBlock(nx, c1y, nz);
+                    bool corner = isSolidBlock(c1x, c1y, nz);
+
+                    uint16_t light = chunk.getPaddedLight(nx, ny, nz);
+                    const BlockInfo& info = getBlockInfo(blockType);
+                    float lightR = info.lightR > 0 ? static_cast<float>(info.lightR) / 15.0f : static_cast<float>(getLightR(light)) / 15.0f;
+                    float lightG = info.lightG > 0 ? static_cast<float>(info.lightG) / 15.0f : static_cast<float>(getLightG(light)) / 15.0f;
+                    float lightB = info.lightB > 0 ? static_cast<float>(info.lightB) / 15.0f : static_cast<float>(getLightB(light)) / 15.0f;
+                    float skyLight = (info.lightR > 0 || info.lightG > 0 || info.lightB > 0)
+                        ? 0.0f
+                        : static_cast<float>(getLightSky(light)) / 15.0f;
+
+                    VoxelVertex vert{};
+                    vert.x = position.x * fScale;
+                    vert.y = position.y * fScale;
+                    vert.z = position.z * fScale;
+                    vert.nx = faceNormals[face].x;
+                    vert.ny = faceNormals[face].y;
+                    vert.nz = faceNormals[face].z;
+                    vert.u = tileU0 + cornerU[face][c] * tileSize;
+                    vert.v = tileV0 + cornerV[face][c] * tileSize;
+                    vert.texIndex = static_cast<float>(texTileID);
+                    vert.ao = calculateAO(s1, s2, corner);
+                    vert.lightR = lightR;
+                    vert.lightG = lightG;
+                    vert.lightB = lightB;
+                    vert.skyLight = skyLight;
+                    vert.lodLevel = lodLvl;
+                    vert.windWeight = 0.0f;
+                    chunk.stagedVertices.push_back(vert);
+                }
+
+                chunk.stagedIndices.push_back(baseIdx + 0);
+                chunk.stagedIndices.push_back(baseIdx + 1);
+                chunk.stagedIndices.push_back(baseIdx + 2);
+                chunk.stagedIndices.push_back(baseIdx + 0);
+                chunk.stagedIndices.push_back(baseIdx + 2);
+                chunk.stagedIndices.push_back(baseIdx + 3);
+            };
+
+            std::vector<uint8_t> mask(CHUNK_SIZE * CHUNK_SIZE, BLOCK_AIR);
+            for (int face = 0; face < 6; ++face) {
+                for (int slice = 0; slice < CHUNK_SIZE; ++slice) {
+                    std::fill(mask.begin(), mask.end(), BLOCK_AIR);
+
+                    for (int v = 0; v < CHUNK_SIZE; ++v) {
+                        for (int u = 0; u < CHUNK_SIZE; ++u) {
+                            IVec3 cell = faceCell(face, slice, u, v);
+                            uint8_t block = chunk.getBlock(
+                                static_cast<int>(cell.x),
+                                static_cast<int>(cell.y),
+                                static_cast<int>(cell.z)
+                            );
+                            if (!isGreedyOpaqueBlock(block)) continue;
+
+                            int nx = static_cast<int>(cell.x) + faceOffsetDirs[face][0];
+                            int ny = static_cast<int>(cell.y) + faceOffsetDirs[face][1];
+                            int nz = static_cast<int>(cell.z) + faceOffsetDirs[face][2];
+                            if (!isSolidBlock(nx, ny, nz)) {
+                                mask[v * CHUNK_SIZE + u] = block;
+                            }
+                        }
+                    }
+
+                    for (int v = 0; v < CHUNK_SIZE; ++v) {
+                        for (int u = 0; u < CHUNK_SIZE; ++u) {
+                            uint8_t block = mask[v * CHUNK_SIZE + u];
+                            if (block == BLOCK_AIR) continue;
+
+                            int width = 1;
+                            while (u + width < CHUNK_SIZE &&
+                                   mask[v * CHUNK_SIZE + u + width] == block) {
+                                ++width;
+                            }
+
+                            int height = 1;
+                            bool canGrow = true;
+                            while (v + height < CHUNK_SIZE && canGrow) {
+                                for (int du = 0; du < width; ++du) {
+                                    if (mask[(v + height) * CHUNK_SIZE + u + du] != block) {
+                                        canGrow = false;
+                                        break;
+                                    }
+                                }
+                                if (canGrow) ++height;
+                            }
+
+                            for (int dv = 0; dv < height; ++dv) {
+                                for (int du = 0; du < width; ++du) {
+                                    mask[(v + dv) * CHUNK_SIZE + u + du] = BLOCK_AIR;
+                                }
+                            }
+                            appendGreedyQuad(block, face, slice, u, v, width, height);
+                        }
+                    }
+                }
+            }
+        }
+
         for (int z = 0; z < CHUNK_SIZE; ++z) {
             for (int y = 0; y < CHUNK_SIZE; ++y) {
                 for (int x = 0; x < CHUNK_SIZE; ++x) {
                     uint8_t blockType = chunk.getBlock(x, y, z);
                     if (blockType == BLOCK_AIR) continue;
+
+                    if (chunk.lod >= 2 && isGreedyOpaqueBlock(blockType)) {
+                        continue;
+                    }
 
                     // World position relative to camera
                     // Position relative to chunk origin

@@ -42,6 +42,37 @@ public:
         glDeleteShader(fragment);
     }
 
+    void compileCompute(const char* computeShaderCode) {
+        GLuint compute = glCreateShader(GL_COMPUTE_SHADER);
+        glShaderSource(compute, 1, &computeShaderCode, NULL);
+        glCompileShader(compute);
+        checkCompileErrors(compute, "COMPUTE");
+
+        GLint compiled = GL_FALSE;
+        glGetShaderiv(compute, GL_COMPILE_STATUS, &compiled);
+        if (compiled != GL_TRUE) {
+            glDeleteShader(compute);
+            programID = 0;
+            return;
+        }
+
+        programID = glCreateProgram();
+        glAttachShader(programID, compute);
+        glLinkProgram(programID);
+        checkCompileErrors(programID, "PROGRAM");
+
+        GLint linked = GL_FALSE;
+        glGetProgramiv(programID, GL_LINK_STATUS, &linked);
+        if (linked != GL_TRUE) {
+            glDeleteProgram(programID);
+            programID = 0;
+            glDeleteShader(compute);
+            return;
+        }
+
+        glDeleteShader(compute);
+    }
+
     void use() const {
         if (programID) glUseProgram(programID);
     }
@@ -63,11 +94,11 @@ public:
     void setFloat(const std::string& name, float value) const {
         glUniform1f(getUniformLoc(name), value);
     }
-    void setVec2(const std::string& name, float x, float y) const {
-        glUniform2f(getUniformLoc(name), x, y);
-    }
     void setVec3(const std::string& name, const Vec3& value) const {
         glUniform3f(getUniformLoc(name), value.x, value.y, value.z);
+    }
+    void setVec2(const std::string& name, float x, float y) const {
+        glUniform2f(getUniformLoc(name), x, y);
     }
     void setMat4(const std::string& name, const Mat4& mat) const {
         glUniformMatrix4fv(getUniformLoc(name), 1, GL_FALSE, mat.m);
