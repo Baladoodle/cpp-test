@@ -13,7 +13,8 @@ struct VoxelVertex {
     float u, v;           // UV Texture Coords
     float texIndex;       // Texture Atlas ID
     float ao;             // Ambient Occlusion (0.2 - 1.0)
-    float blockLight;     // Emissive Block Light (0.0 - 1.0)
+    float lightR, lightG, lightB; // Emissive RGB Block Light (0.0 - 1.0)
+    float skyLight;       // 3D Sky Light (0.0 - 1.0)
     float lodLevel;       // LOD level for shader fog/fade
     float windWeight;     // 0 at the ground, 1 at the tip of wind-animated plants
 };
@@ -113,17 +114,21 @@ public:
         glEnableVertexAttribArray(4);
         glVertexAttribPointer(4, 1, GL_FLOAT, GL_FALSE, sizeof(VoxelVertex), (void*)offsetof(VoxelVertex, ao));
 
-        // Attribute 5: Block Light
+        // Attribute 5: Block Light RGB
         glEnableVertexAttribArray(5);
-        glVertexAttribPointer(5, 1, GL_FLOAT, GL_FALSE, sizeof(VoxelVertex), (void*)offsetof(VoxelVertex, blockLight));
+        glVertexAttribPointer(5, 3, GL_FLOAT, GL_FALSE, sizeof(VoxelVertex), (void*)offsetof(VoxelVertex, lightR));
 
-        // Attribute 6: LOD Level
+        // Attribute 6: Sky Light
         glEnableVertexAttribArray(6);
-        glVertexAttribPointer(6, 1, GL_FLOAT, GL_FALSE, sizeof(VoxelVertex), (void*)offsetof(VoxelVertex, lodLevel));
+        glVertexAttribPointer(6, 1, GL_FLOAT, GL_FALSE, sizeof(VoxelVertex), (void*)offsetof(VoxelVertex, skyLight));
 
-        // Attribute 7: Wind weight
+        // Attribute 7: LOD Level
         glEnableVertexAttribArray(7);
-        glVertexAttribPointer(7, 1, GL_FLOAT, GL_FALSE, sizeof(VoxelVertex), (void*)offsetof(VoxelVertex, windWeight));
+        glVertexAttribPointer(7, 1, GL_FLOAT, GL_FALSE, sizeof(VoxelVertex), (void*)offsetof(VoxelVertex, lodLevel));
+
+        // Attribute 8: Wind weight
+        glEnableVertexAttribArray(8);
+        glVertexAttribPointer(8, 1, GL_FLOAT, GL_FALSE, sizeof(VoxelVertex), (void*)offsetof(VoxelVertex, windWeight));
 
         glBindVertexArray(0);
         uploaded = true;

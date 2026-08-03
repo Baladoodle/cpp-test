@@ -25,7 +25,6 @@ bool firstMouse = true;
 float lastX = 640.0f, lastY = 360.0f;
 bool cursorLocked = true;
 bool showHUD = true;
-
 // Key callback
 void keyCallback(GLFWwindow* window, int key, int scancode, int action, int mods) {
     if (key >= 0 && key < 1024) {
@@ -40,7 +39,7 @@ void keyCallback(GLFWwindow* window, int key, int scancode, int action, int mods
             if (key == GLFW_KEY_H) {
                 showHUD = !showHUD;
             }
-            // Toggle cursor capture
+
             if (key == GLFW_KEY_ESCAPE) {
                 cursorLocked = !cursorLocked;
                 glfwSetInputMode(window, GLFW_CURSOR, cursorLocked ? GLFW_CURSOR_DISABLED : GLFW_CURSOR_NORMAL);
@@ -121,9 +120,10 @@ int main(int argc, char** argv) {
         layout (location = 2) in vec2 aTexCoord;
         layout (location = 3) in float aTexIndex;
         layout (location = 4) in float aAO;
-        layout (location = 5) in float aBlockLight;
-        layout (location = 6) in float aLodLevel;
-        layout (location = 7) in float aWindWeight;
+        layout (location = 5) in vec3 aBlockRGB;
+        layout (location = 6) in float aSkyLight;
+        layout (location = 7) in float aLodLevel;
+        layout (location = 8) in float aWindWeight;
 
         out vec3 vNormal;
         out vec2 vTexCoord;
@@ -131,9 +131,11 @@ int main(int argc, char** argv) {
         flat out int vCutoutTile;
         out vec2 vCutoutLocalUV;
         out float vAO;
-        out float vBlockLight;
+        out vec3 vBlockRGB;
+        out float vSkyLight;
         out float vDistance;
         out float vLodLevel;
+        out vec3 vWorldPosRelative;
 
         uniform mat4 uProjection;
         uniform mat4 uView;
@@ -165,9 +167,11 @@ int main(int argc, char** argv) {
             );
             vCutoutLocalUV = aTexCoord * 16.0 - atlasTile;
             vAO = aAO;
-            vBlockLight = aBlockLight;
+            vBlockRGB = aBlockRGB;
+            vSkyLight = aSkyLight;
             vDistance = length(relPos);
             vLodLevel = aLodLevel;
+            vWorldPosRelative = relPos;
         }
     )";
 
@@ -179,17 +183,22 @@ int main(int argc, char** argv) {
         flat in int vCutoutTile;
         in vec2 vCutoutLocalUV;
         in float vAO;
-        in float vBlockLight;
+        in vec3 vBlockRGB;
+        in float vSkyLight;
         in float vDistance;
         in float vLodLevel;
+        in vec3 vWorldPosRelative;
 
         out vec4 FragColor;
 
         uniform sampler2D uTextureAtlas;
         uniform vec3 uSunDir;
         uniform vec3 uSunColor;
-        uniform vec3 uAmbientColor;
+        uniform vec3 uSkyAmbientColor;
+        uniform vec3 uAbyssAmbientColor;
+        uniform vec3 uSkyTint;
         uniform vec3 uFogColor;
+        uniform float uTime;
 
         void main() {
             vec4 texColor;
@@ -200,9 +209,6 @@ int main(int argc, char** argv) {
                 (vCutoutTile >= 38 && vCutoutTile <= 57);
             bool isGrassTile = vCutoutTile >= 29 && vCutoutTile <= 37;
             if (isLeafTile || isGrassTile) {
-                // Cutout foliage is authored as pixel art. Read the exact
-                // atlas texel so transparent edges cannot pull color from a
-                // neighboring tile.
                 int tileID = vCutoutTile;
                 ivec2 tileBase = ivec2((tileID % 16) * 16, (tileID / 16) * 16);
                 ivec2 localPixel = ivec2(
@@ -215,19 +221,37 @@ int main(int argc, char** argv) {
             }
             if (texColor.a < 0.1) discard;
 
-            // Directional sun shading
+            // 1. Hemispheric Ambient Shading (Top vs Underside Glow)
+            float hemiFactor = clamp(vNormal.y * 0.5 + 0.5, 0.0, 1.0);
+            vec3 hemiAmbient = mix(uAbyssAmbientColor, uSkyAmbientColor, hemiFactor);
+
+            // 2. Directional Sun Shading
             float diff = max(dot(vNormal, normalize(uSunDir)), 0.0);
-            vec3 sunLight = uAmbientColor + uSunColor * (diff * 0.7 + 0.3);
+            vec3 directSun = uSunColor * (diff * 0.65 + 0.35);
 
-            // Block emissive light (from Glow Crystals)
-            vec3 emissiveLight = vec3(1.0, 0.9, 0.5) * vBlockLight;
+            // 3. Emissive RGB Block Light (Glow Crystals, Sky Quartz, Lava)
+            vec3 emissiveRGB = vBlockRGB * 1.4;
 
-            // Surface color with AO
-            vec3 baseColor = texColor.rgb * (sunLight + emissiveLight) * vAO;
+            // 4. Subsurface Scattering Translucency & Rim Lighting for Foliage
+            vec3 viewDir = normalize(-vWorldPosRelative);
+            vec3 sunDirNorm = normalize(uSunDir);
+            vec3 extraFoliageLight = vec3(0.0);
+            if (isLeafTile || isGrassTile) {
+                float backLighting = max(0.0, dot(-viewDir, sunDirNorm));
+                float sss = pow(backLighting, 3.0) * 0.65;
+                float rim = pow(1.0 - max(0.0, dot(viewDir, vNormal)), 3.5) * 0.25;
+                extraFoliageLight = uSunColor * (sss + rim);
+            }
 
-            // Atmospheric fog calibrated to the active LOD 4 shell. Nearby
-            // islands stay readable, while anything at the 1,152-block edge
-            // is fully blended into the sky color.
+            // Total Combined Surface Illumination
+            vec3 totalLight = hemiAmbient + directSun * 0.8 + emissiveRGB + extraFoliageLight;
+
+            // Soft Ease-Out Contact Ambient Occlusion
+            float aoShadow = 1.0 - vAO;
+            float smoothAO = 1.0 - pow(aoShadow, 1.35) * 0.72;
+            vec3 baseColor = texColor.rgb * totalLight * smoothAO;
+
+            // Atmospheric Fog blending distant islands into sky color
             float fogStart = 0.0;
             float fogEnd = 4608.0 / 4.0;
             float fogFactor = smoothstep(fogStart, fogEnd, vDistance);
@@ -303,19 +327,25 @@ int main(int argc, char** argv) {
         Vec3 sunDir(std::cos(sunAngle), std::sin(sunAngle), 0.3f);
         sunDir = sunDir.normalized();
 
+        // Vertical Altitude & Abyss Atmospheric Tinting
+        float camY = camera.position.y;
+        float altitudeFactor = std::clamp((camY + 150.0f) / 600.0f, 0.0f, 1.0f);
+
         Vec3 sunColor(1.0f, 0.95f, 0.85f);
-        Vec3 ambientColor(0.35f, 0.38f, 0.45f);
         Vec3 skyTop(0.2f, 0.5f, 0.9f);
-        Vec3 skyHorizon(0.7f, 0.85f, 1.0f);
+        Vec3 skyHorizon = Vec3::lerp(Vec3(0.35f, 0.32f, 0.55f), Vec3(0.70f, 0.85f, 1.00f), altitudeFactor);
         Vec3 fogColor = skyHorizon;
 
+        Vec3 skyAmbientColor = Vec3::lerp(Vec3(0.35f, 0.45f, 0.65f), Vec3(0.55f, 0.72f, 0.95f), altitudeFactor);
+        Vec3 abyssAmbientColor = Vec3::lerp(Vec3(0.10f, 0.08f, 0.18f), Vec3(0.22f, 0.25f, 0.35f), altitudeFactor);
         // Night time adjustments
         if (sunDir.y < 0.0f) {
             float nightFactor = std::clamp(-sunDir.y * 2.0f, 0.0f, 1.0f);
             skyTop = Vec3::lerp(skyTop, Vec3(0.02f, 0.03f, 0.08f), nightFactor);
             skyHorizon = Vec3::lerp(skyHorizon, Vec3(0.05f, 0.08f, 0.15f), nightFactor);
             fogColor = skyHorizon;
-            ambientColor = Vec3::lerp(ambientColor, Vec3(0.1f, 0.12f, 0.2f), nightFactor);
+            skyAmbientColor = Vec3::lerp(skyAmbientColor, Vec3(0.1f, 0.12f, 0.2f), nightFactor);
+            abyssAmbientColor = Vec3::lerp(abyssAmbientColor, Vec3(0.05f, 0.06f, 0.1f), nightFactor);
             sunColor = Vec3::lerp(sunColor, Vec3(0.2f, 0.2f, 0.3f), nightFactor);
         }
 
@@ -343,12 +373,12 @@ int main(int argc, char** argv) {
         voxelShader.setMat4("uView", view);
         voxelShader.setVec3("uSunDir", sunDir);
         voxelShader.setVec3("uSunColor", sunColor);
-        voxelShader.setVec3("uAmbientColor", ambientColor);
+        voxelShader.setVec3("uSkyAmbientColor", skyAmbientColor);
+        voxelShader.setVec3("uAbyssAmbientColor", abyssAmbientColor);
+        voxelShader.setVec3("uSkyTint", skyHorizon);
         voxelShader.setVec3("uFogColor", fogColor);
-        voxelShader.setVec3("uCameraWorldPos", camera.position);
         voxelShader.setFloat("uTime", currentFrame);
 
-        glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, atlasTexture);
         voxelShader.setInt("uTextureAtlas", 0);
 
@@ -368,7 +398,6 @@ int main(int argc, char** argv) {
             ss5 << "Chunks: " << totalChunks << " loaded | Meshes: " << uploadedMeshes << " | Queued Tasks: " << pendingTasks;
             ss6 << "Mode: " << (physics.isFlying ? "FLYING (WASD + Space/Shift)" : "WALKING (Physics Collision)")
                 << (superSpeed ? " [SUPER SPEED 160m/s]" : "") << " | [F] Toggle Fly | [H] HUD";
-
             hud.renderText(ss1.str(), 16.0f, 16.0f, 1.8f, Vec3(1.0f, 0.9f, 0.2f), static_cast<float>(windowWidth), static_cast<float>(windowHeight));
             hud.renderText(ss2.str(), 16.0f, 44.0f, 1.5f, Vec3(0.3f, 1.0f, 0.4f), static_cast<float>(windowWidth), static_cast<float>(windowHeight));
             hud.renderText(ss3.str(), 16.0f, 68.0f, 1.5f, Vec3(0.9f, 0.9f, 0.9f), static_cast<float>(windowWidth), static_cast<float>(windowHeight));

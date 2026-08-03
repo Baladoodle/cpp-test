@@ -6,11 +6,119 @@
 #include "Block.hpp"
 #include "MathUtils.hpp"
 #include <vector>
+#include <queue>
+#include <tuple>
 #include <cstdint>
 #include <algorithm>
 
 class MeshBuilder {
 private:
+    struct LightNode {
+        int8_t x, y, z;
+    };
+
+    static void propagateLight3D(Chunk& chunk) {
+        if (chunk.isEmpty) return;
+
+        chunk.paddedLight.assign(PADDED_VOL, 0);
+
+        std::queue<LightNode> lightQueue;
+
+        for (int z = -1; z <= CHUNK_SIZE; ++z) {
+            for (int x = -1; x <= CHUNK_SIZE; ++x) {
+                uint8_t topBlock = chunk.getPaddedBlock(x, CHUNK_SIZE, z);
+                bool openSky = getBlockInfo(topBlock).isTransparent;
+                uint8_t skyVal = openSky ? 15 : 0;
+
+                for (int y = CHUNK_SIZE; y >= -1; --y) {
+                    uint8_t block = chunk.getPaddedBlock(x, y, z);
+                    const BlockInfo& info = getBlockInfo(block);
+
+                    if (!info.isTransparent) {
+                        openSky = false;
+                        skyVal = 0;
+                    } else if (openSky && isAnyLeaf(block)) {
+                        skyVal = (skyVal > 3) ? skyVal - 2 : 0;
+                    }
+
+                    uint8_t r = info.lightR;
+                    uint8_t g = info.lightG;
+                    uint8_t b = info.lightB;
+                    uint8_t sky = skyVal;
+
+                    bool isBorder = (x == -1 || x == CHUNK_SIZE ||
+                                     y == -1 || y == CHUNK_SIZE ||
+                                     z == -1 || z == CHUNK_SIZE);
+                    if (isBorder && info.isTransparent && openSky) {
+                        sky = 15;
+                    }
+
+                    if (r > 0 || g > 0 || b > 0 || sky > 0) {
+                        chunk.setPaddedLight(x, y, z, packLight(r, g, b, sky));
+                        lightQueue.push({static_cast<int8_t>(x), static_cast<int8_t>(y), static_cast<int8_t>(z)});
+                    }
+                }
+            }
+        }
+
+        const int dx[6] = { 1, -1,  0,  0,  0,  0 };
+        const int dy[6] = { 0,  0,  1, -1,  0,  0 };
+        const int dz[6] = { 0,  0,  0,  0,  1, -1 };
+
+        while (!lightQueue.empty()) {
+            LightNode curr = lightQueue.front();
+            lightQueue.pop();
+
+            uint16_t currLight = chunk.getPaddedLight(curr.x, curr.y, curr.z);
+            uint8_t cr = getLightR(currLight);
+            uint8_t cg = getLightG(currLight);
+            uint8_t cb = getLightB(currLight);
+            uint8_t csky = getLightSky(currLight);
+
+            for (int i = 0; i < 6; ++i) {
+                int nx = curr.x + dx[i];
+                int ny = curr.y + dy[i];
+                int nz = curr.z + dz[i];
+
+                if (nx < -1 || nx > CHUNK_SIZE || ny < -1 || ny > CHUNK_SIZE || nz < -1 || nz > CHUNK_SIZE)
+                    continue;
+
+                uint8_t nBlock = chunk.getPaddedBlock(nx, ny, nz);
+                if (!getBlockInfo(nBlock).isTransparent) continue;
+
+                uint16_t nLight = chunk.getPaddedLight(nx, ny, nz);
+                uint8_t nr = getLightR(nLight);
+                uint8_t ng = getLightG(nLight);
+                uint8_t nb = getLightB(nLight);
+                uint8_t nsky = getLightSky(nLight);
+
+                uint8_t tr = (cr > 1) ? cr - 1 : 0;
+                uint8_t tg = (cg > 1) ? cg - 1 : 0;
+                uint8_t tb = (cb > 1) ? cb - 1 : 0;
+                uint8_t tsky = (csky > 1) ? csky - 1 : 0;
+
+                bool updated = false;
+                if (tr > nr) { nr = tr; updated = true; }
+                if (tg > ng) { ng = tg; updated = true; }
+                if (tb > nb) { nb = tb; updated = true; }
+                if (tsky > nsky) { nsky = tsky; updated = true; }
+
+                if (updated) {
+                    chunk.setPaddedLight(nx, ny, nz, packLight(nr, ng, nb, nsky));
+                    lightQueue.push({static_cast<int8_t>(nx), static_cast<int8_t>(ny), static_cast<int8_t>(nz)});
+                }
+            }
+        }
+
+        for (int y = 0; y < CHUNK_SIZE; ++y) {
+            for (int z = 0; z < CHUNK_SIZE; ++z) {
+                for (int x = 0; x < CHUNK_SIZE; ++x) {
+                    chunk.setLight(x, y, z, chunk.getPaddedLight(x, y, z));
+                }
+            }
+        }
+    }
+
     // Helper to calculate vertex AO based on adjacent solid blocks
     static float calculateAO(bool side1, bool side2, bool corner) {
         if (side1 && side2) return 0.25f; // Darkest corner
@@ -81,10 +189,6 @@ public:
 
                     if (block != BLOCK_AIR) {
                         hasSolid = true;
-                        uint8_t emission = getBlockInfo(block).lightEmission;
-                        if (emission > 0) {
-                            chunk.light[getVoxelIndex(x, y, z)] = emission;
-                        }
                     }
                 }
             }
@@ -284,6 +388,7 @@ public:
                     }
                 }
             }
+            propagateLight3D(chunk);
         }
         chunk.isGenerated = true;
     }
@@ -397,7 +502,15 @@ public:
                     vert.v = tileV0 + halfTexel + quadUV[c][1] * safeTileSize;
                     vert.texIndex = static_cast<float>(texTileID);
                     vert.ao = 1.0f;
-                    vert.blockLight = 0.0f;
+                    uint16_t plantL = chunk.getLight(
+                        std::clamp(static_cast<int>(blockRelX / fScale), 0, CHUNK_SIZE - 1),
+                        std::clamp(static_cast<int>((blockRelY + 0.05f) / fScale), 0, CHUNK_SIZE - 1),
+                        std::clamp(static_cast<int>(blockRelZ / fScale), 0, CHUNK_SIZE - 1)
+                    );
+                    vert.lightR = static_cast<float>(getLightR(plantL)) / 15.0f;
+                    vert.lightG = static_cast<float>(getLightG(plantL)) / 15.0f;
+                    vert.lightB = static_cast<float>(getLightB(plantL)) / 15.0f;
+                    vert.skyLight = static_cast<float>(getLightSky(plantL)) / 15.0f;
                     vert.lodLevel = lodLvl;
                     vert.windWeight = quadWindWeights[c];
                     chunk.stagedVertices.push_back(vert);
@@ -509,9 +622,20 @@ public:
                         bool flipGrassSideV = blockType == BLOCK_GRASS &&
                             f != DIR_POS_Y && f != DIR_NEG_Y;
 
-                        uint8_t emission = getBlockInfo(blockType).lightEmission;
-                        float blockEmissive = (emission > 0) ? (static_cast<float>(emission) / 15.0f) : getLightVal(nx, ny, nz);
-
+                        const BlockInfo& bInfo = getBlockInfo(blockType);
+                        float fR = 0.0f, fG = 0.0f, fB = 0.0f, fSky = 0.0f;
+                        if (bInfo.lightR > 0 || bInfo.lightG > 0 || bInfo.lightB > 0) {
+                            fR = static_cast<float>(bInfo.lightR) / 15.0f;
+                            fG = static_cast<float>(bInfo.lightG) / 15.0f;
+                            fB = static_cast<float>(bInfo.lightB) / 15.0f;
+                            fSky = 0.0f;
+                        } else {
+                            uint16_t lVal = chunk.getPaddedLight(nx, ny, nz);
+                            fR = static_cast<float>(getLightR(lVal)) / 15.0f;
+                            fG = static_cast<float>(getLightG(lVal)) / 15.0f;
+                            fB = static_cast<float>(getLightB(lVal)) / 15.0f;
+                            fSky = static_cast<float>(getLightSky(lVal)) / 15.0f;
+                        }
                         // Calculate AO for each corner vertex
                         float ao[4];
                         for (int c = 0; c < 4; ++c) {
@@ -543,7 +667,10 @@ public:
                             vert.v = tileV0 + faceV * tileSize;
                             vert.texIndex = static_cast<float>(texTileID);
                             vert.ao = ao[c];
-                            vert.blockLight = blockEmissive;
+                            vert.lightR = fR;
+                            vert.lightG = fG;
+                            vert.lightB = fB;
+                            vert.skyLight = fSky;
                             vert.lodLevel = lodLvl;
                             vert.windWeight = 0.0f;
 

@@ -35,7 +35,9 @@ struct BlockInfo {
     const char* name;
     bool isSolid;
     bool isTransparent;
-    uint8_t lightEmission;
+    uint8_t lightR;
+    uint8_t lightG;
+    uint8_t lightB;
     uint8_t topTex;
     uint8_t sideTex;
     uint8_t bottomTex;
@@ -43,22 +45,22 @@ struct BlockInfo {
 
 inline const BlockInfo& getBlockInfo(uint8_t type) {
     static const BlockInfo infos[BLOCK_COUNT] = {
-        // name, solid, transparent, lightEmission, topTex, sideTex, bottomTex
-        { "Air",            false, true,  0,  0,  0,  0 },
-        { "Grass",          true,  false, 0,  0,  1,  2 }, // 0=GrassTop, 1=GrassSide, 2=Dirt
-        { "Dirt",           true,  false, 0,  2,  2,  2 },
-        { "Stone",          true,  false, 0,  3,  3,  3 },
-        { "Glow Crystal",   true,  false, 15, 4,  4,  4 }, // Emissive light level 15
-        { "Oak Log",        true,  false, 0,  6,  5,  6 }, // 5=LogSide, 6=LogTop
-        { "Leaves",         true,  true,  0,  7,  7,  7 },
-        { "Sand",           true,  false, 0,  8,  8,  8 },
-        { "Sky Quartz",     true,  false, 8,  9,  9,  9 },
-        { "Water",          false, true,  0, 10, 10, 10 },
-        { "Light Oak Leaves",true,  true,  0, 13, 13, 13 },
-        { "Dark Oak Leaves", true,  true,  0, 19, 19, 19 },
-        { "Warm Oak Leaves", true,  true,  0, 23, 23, 23 },
-        { "Tall Grass",      false, true,  0, 29, 29, 29 },
-        { "Tall Grass Top",  false, true,  0, 32, 32, 32 }
+        // name, solid, transparent, lightR, lightG, lightB, topTex, sideTex, bottomTex
+        { "Air",            false, true,  0,  0,  0,  0,  0,  0 },
+        { "Grass",          true,  false, 0,  0,  0,  0,  1,  2 }, // 0=GrassTop, 1=GrassSide, 2=Dirt
+        { "Dirt",           true,  false, 0,  0,  0,  2,  2,  2 },
+        { "Stone",          true,  false, 0,  0,  0,  3,  3,  3 },
+        { "Glow Crystal",   true,  false, 15, 13, 6,  4,  4,  4 }, // Warm Golden Glow
+        { "Oak Log",        true,  false, 0,  0,  0,  6,  5,  6 }, // 5=LogSide, 6=LogTop
+        { "Leaves",         true,  true,  0,  0,  0,  7,  7,  7 },
+        { "Sand",           true,  false, 0,  0,  0,  8,  8,  8 },
+        { "Sky Quartz",     true,  false, 4, 12, 15,  9,  9,  9 }, // Cyan Glow
+        { "Water",          false, true,  0,  0,  0, 10, 10, 10 },
+        { "Light Oak Leaves",true,  true,  0,  0,  0, 13, 13, 13 },
+        { "Dark Oak Leaves", true,  true,  0,  0,  0, 19, 19, 19 },
+        { "Warm Oak Leaves", true,  true,  0,  0,  0, 23, 23, 23 },
+        { "Tall Grass",      false, true,  0,  0,  0, 29, 29, 29 },
+        { "Tall Grass Top",  false, true,  0,  0,  0, 32, 32, 32 }
     };
     if (type >= BLOCK_COUNT) return infos[0];
     return infos[type];
