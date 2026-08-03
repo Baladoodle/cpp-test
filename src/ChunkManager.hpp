@@ -104,6 +104,8 @@ private:
     };
     std::vector<std::shared_ptr<Chunk>> stagedMeshQueue;
     std::mutex stagedMutex;
+    std::atomic<size_t> stagedMeshBytes{0};
+    static constexpr size_t MAX_STAGED_MESH_BYTES = 256ull * 1024ull * 1024ull;
 
     static void getChunkBounds(const Chunk* chunk, Vec3 cameraPos, Vec3& minP, Vec3& maxP) {
         minP = Vec3(
@@ -471,7 +473,8 @@ private:
             std::shared_ptr<Chunk> chunk = std::move(task.chunk);
 
             if (chunk) {
-                if (chunk->workToken.load() != task.workToken) continue;
+                if (!chunk->resident.load(std::memory_order_acquire) ||
+                    chunk->workToken.load(std::memory_order_acquire) != task.workToken) continue;
                 Vec3 cameraSnapshot;
                 {
                     std::lock_guard<std::mutex> cameraLock(cameraMutex);
@@ -500,17 +503,28 @@ private:
                         chunk->mipRevision.store(0);
                     }
                     auto t1 = std::chrono::high_resolution_clock::now();
+                    while (!stopThreads && stagedMeshBytes.load(std::memory_order_relaxed) >= MAX_STAGED_MESH_BYTES) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    }
                     MeshBuilder::buildMesh(*chunk);
                     auto t2 = std::chrono::high_resolution_clock::now();
                     totalGenTimeUs += std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
                     totalMeshTimeUs += std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count();
                     mipStore.publishSection(chunk->lod, chunk->chunkPos, chunk->blocks);
-                    mipStore.publishSection(chunk->lod, chunk->chunkPos, chunk->blocks);
                     chunk->mipRemeshQueued.store(false);
                     chunksProcessed++;
-                    if (chunk->isMeshStaged.load()) {
+                    bool taskValid = chunk->resident.load(std::memory_order_acquire) &&
+                        chunk->workToken.load(std::memory_order_acquire) == task.workToken;
+                    if (taskValid && chunk->isMeshStaged.load()) {
+                        size_t bytes = chunk->stagedVertices.size() * sizeof(VoxelVertex) +
+                                       chunk->stagedIndices.size() * sizeof(uint32_t);
+                        stagedMeshBytes.fetch_add(bytes, std::memory_order_relaxed);
                         std::lock_guard<std::mutex> lock(stagedMutex);
                         stagedMeshQueue.push_back(chunk);
+                    } else {
+                        chunk->stagedVertices.clear();
+                        chunk->stagedIndices.clear();
+                        chunk->isMeshStaged.store(false);
                     }
                 }
                 if (chunk->workToken.load() == task.workToken) {
@@ -564,7 +578,6 @@ public:
             std::lock_guard<std::mutex> cameraLock(cameraMutex);
             currentCamPos = cameraPos;
         }
-        trimGenerationQueue(cameraPos);
 
         // Child completion can replace an already-generated coarse section.
         // Keep its current GPU mesh as a fallback while the worker rebuilds
@@ -607,7 +620,19 @@ public:
 
         size_t uploadedBytesThisFrame = 0;
         for (auto& chunk : stagedToUpload) {
-            if (!chunk || !chunk->isMeshStaged.load()) continue;
+            auto& map = chunks[chunk->lod];
+            auto it = map.find(chunk->chunkPos);
+            bool stillOwned = (it != map.end() && it->second.get() == chunk.get() && chunk->resident.load(std::memory_order_acquire));
+            if (!stillOwned || !chunk->isMeshStaged.load()) {
+                size_t bytes = chunk->stagedVertices.size() * sizeof(VoxelVertex) +
+                               chunk->stagedIndices.size() * sizeof(uint32_t);
+                size_t cur = stagedMeshBytes.load(std::memory_order_relaxed);
+                stagedMeshBytes.store(cur > bytes ? cur - bytes : 0, std::memory_order_relaxed);
+                chunk->stagedVertices.clear();
+                chunk->stagedIndices.clear();
+                chunk->isMeshStaged.store(false);
+                continue;
+            }
             size_t meshBytes =
                 chunk->stagedVertices.size() * sizeof(VoxelVertex) +
                 chunk->stagedIndices.size() * sizeof(uint32_t);
@@ -617,7 +642,8 @@ public:
                 stagedMeshQueue.push_back(chunk);
                 continue;
             }
-
+            size_t cur = stagedMeshBytes.load(std::memory_order_relaxed);
+            stagedMeshBytes.store(cur > meshBytes ? cur - meshBytes : 0, std::memory_order_relaxed);
             GeometryHandle oldGeometry = chunk->mesh.geometry;
             GeometryHandle geometry;
             if (meshBytes > 0) {
@@ -649,10 +675,13 @@ public:
         }
 
         if (cameraCellChanged) {
+            trimGenerationQueue(cameraPos);
             for (int lod = 0; lod < NUM_LODS; ++lod) {
                 for (auto it = chunks[lod].begin(); it != chunks[lod].end(); ) {
                     Chunk* chunk = it->second.get();
                     if (isChunkOutOfRange(chunk, cameraPos)) {
+                        chunk->resident.store(false, std::memory_order_release);
+                        chunk->workToken.fetch_add(1, std::memory_order_acq_rel);
                         geometryArena.release(chunk->mesh.geometry);
                         ++sceneRevision;
                         chunk->mesh.cleanUp();

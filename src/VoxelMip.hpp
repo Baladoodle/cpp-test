@@ -83,6 +83,16 @@ private:
         return static_cast<uint8_t>(x | (y << 1) | (z << 2));
     }
 
+    void queueCompletedUnlocked(int lod, const IVec3& pos, uint64_t revision) {
+        for (auto& item : completed) {
+            if (item.lod == lod && item.chunkPos == pos) {
+                item.revision = std::max(item.revision, revision);
+                return;
+            }
+        }
+        completed.push_back({lod, pos, revision});
+    }
+
     void publishParentUnlocked(int lod, const IVec3& childPos, const uint8_t* childBlocks) {
         if (lod >= NUM_LEVELS - 1) return;
 
@@ -98,6 +108,7 @@ private:
             parent.blocks.fill(BLOCK_AIR);
         }
 
+        bool contentChanged = false;
         for (int z = 0; z < CHUNK_SIZE / 2; ++z) {
             for (int y = 0; y < CHUNK_SIZE / 2; ++y) {
                 for (int x = 0; x < CHUNK_SIZE / 2; ++x) {
@@ -105,15 +116,21 @@ private:
                     int parentX = static_cast<int>((childPos.x - parentPos.x * 2) * (CHUNK_SIZE / 2)) + x;
                     int parentY = static_cast<int>((childPos.y - parentPos.y * 2) * (CHUNK_SIZE / 2)) + y;
                     int parentZ = static_cast<int>((childPos.z - parentPos.z * 2) * (CHUNK_SIZE / 2)) + z;
-                    parent.blocks[getVoxelIndex(parentX, parentY, parentZ)] = block;
+                    uint8_t& dest = parent.blocks[getVoxelIndex(parentX, parentY, parentZ)];
+                    if (dest != block) {
+                        dest = block;
+                        contentChanged = true;
+                    }
                 }
             }
         }
 
         parent.childMask = static_cast<uint8_t>(parent.childMask | bit);
-        if (parent.childMask == 0xFF && (!wasComplete || bit != 0)) {
+        bool isComplete = parent.childMask == 0xFF;
+        bool becameComplete = isComplete && !wasComplete;
+        if (isComplete && (becameComplete || contentChanged)) {
             ++parent.revision;
-            completed.push_back({lod + 1, parentPos, parent.revision});
+            queueCompletedUnlocked(lod + 1, parentPos, parent.revision);
             std::array<uint8_t, CHUNK_VOL> completedBlocks = parent.blocks;
             publishParentUnlocked(lod + 1, parentPos, completedBlocks.data());
         }
@@ -174,32 +191,43 @@ public:
 
     void requeueCompleted(const CompletedSection& section) {
         std::lock_guard<std::mutex> lock(mutex);
-        completed.push_back(section);
+        queueCompletedUnlocked(section.lod, section.chunkPos, section.revision);
     }
 
     void prune(const Vec3& cameraPos) {
         constexpr size_t MAX_SECTIONS_PER_LEVEL = 1024;
         std::lock_guard<std::mutex> lock(mutex);
         for (int lod = 1; lod < NUM_LEVELS; ++lod) {
-            while (levels[lod].size() > MAX_SECTIONS_PER_LEVEL) {
-                auto farthest = levels[lod].end();
-                float farthestDistance = -1.0f;
-                float sectionSize = static_cast<float>(CHUNK_SIZE * (1 << lod));
-                for (auto it = levels[lod].begin(); it != levels[lod].end(); ++it) {
-                    float centerX = static_cast<float>(it->first.x) * sectionSize + sectionSize * 0.5f;
-                    float centerY = static_cast<float>(it->first.y) * sectionSize + sectionSize * 0.5f;
-                    float centerZ = static_cast<float>(it->first.z) * sectionSize + sectionSize * 0.5f;
-                    float dx = centerX - cameraPos.x;
-                    float dy = centerY - cameraPos.y;
-                    float dz = centerZ - cameraPos.z;
-                    float distance = dx * dx + dy * dy + dz * dz;
-                    if (distance > farthestDistance) {
-                        farthestDistance = distance;
-                        farthest = it;
-                    }
-                }
-                if (farthest == levels[lod].end()) break;
-                levels[lod].erase(farthest);
+            if (levels[lod].size() <= MAX_SECTIONS_PER_LEVEL) continue;
+
+            struct DistEntry {
+                IVec3 pos;
+                float distSq;
+            };
+            std::vector<DistEntry> entries;
+            entries.reserve(levels[lod].size());
+
+            float sectionSize = static_cast<float>(CHUNK_SIZE * (1 << lod));
+            for (auto it = levels[lod].begin(); it != levels[lod].end(); ++it) {
+                float centerX = static_cast<float>(it->first.x) * sectionSize + sectionSize * 0.5f;
+                float centerY = static_cast<float>(it->first.y) * sectionSize + sectionSize * 0.5f;
+                float centerZ = static_cast<float>(it->first.z) * sectionSize + sectionSize * 0.5f;
+                float dx = centerX - cameraPos.x;
+                float dy = centerY - cameraPos.y;
+                float dz = centerZ - cameraPos.z;
+                entries.push_back({it->first, dx * dx + dy * dy + dz * dz});
+            }
+
+            size_t removeCount = levels[lod].size() - MAX_SECTIONS_PER_LEVEL;
+            std::nth_element(
+                entries.begin(),
+                entries.begin() + removeCount,
+                entries.end(),
+                [](const DistEntry& a, const DistEntry& b) { return a.distSq > b.distSq; }
+            );
+
+            for (size_t i = 0; i < removeCount; ++i) {
+                levels[lod].erase(entries[i].pos);
             }
         }
     }

@@ -85,6 +85,10 @@ private:
     static constexpr size_t NUM_FRAME_CONTEXTS = 3;
     struct FrameContext {
         GLsync fence = 0;
+        GLuint metadataBuffer = 0;
+        GLuint indirectBuffer = 0;
+        size_t metadataCapacityBytes = 0;
+        size_t indirectCapacityBytes = 0;
         std::vector<GeometryHandle> retiredGeometry;
     };
     FrameContext frameContexts[NUM_FRAME_CONTEXTS];
@@ -171,24 +175,28 @@ private:
         glBindVertexArray(0);
     }
 
-    void growVertexStorage(size_t required) {
+    bool growVertexStorage(size_t required) {
         size_t oldCapacity = vertexCapacity;
-        size_t newCapacity = std::max(required, std::max<size_t>(1, oldCapacity * 2));
-        releaseRange(freeVertexRanges, oldCapacity, newCapacity - oldCapacity);
+        if (oldCapacity > std::numeric_limits<size_t>::max() / 2) return false;
+        size_t newCapacity = std::max(required, oldCapacity * 2);
 
-        // Move the existing arena on the GPU. Re-uploading the entire CPU
-        // mirror here caused multi-hundred-millisecond render-thread stalls
-        // whenever the arena crossed a capacity boundary.
         GLuint oldVbo = vbo;
         GLuint newVbo = 0;
         glGenBuffers(1, &newVbo);
         glBindBuffer(GL_COPY_WRITE_BUFFER, newVbo);
+        while (glGetError() != GL_NO_ERROR);
+
         glBufferData(
             GL_COPY_WRITE_BUFFER,
             static_cast<GLsizeiptr>(newCapacity * sizeof(VoxelVertex)),
             nullptr,
             GL_DYNAMIC_DRAW
         );
+        if (glGetError() != GL_NO_ERROR) {
+            glDeleteBuffers(1, &newVbo);
+            return false;
+        }
+
         glBindBuffer(GL_COPY_READ_BUFFER, oldVbo);
         glCopyBufferSubData(
             GL_COPY_READ_BUFFER,
@@ -197,27 +205,41 @@ private:
             0,
             static_cast<GLsizeiptr>(oldCapacity * sizeof(VoxelVertex))
         );
-        glDeleteBuffers(1, &oldVbo);
+        if (glGetError() != GL_NO_ERROR) {
+            glDeleteBuffers(1, &newVbo);
+            return false;
+        }
+
         vbo = newVbo;
         vertexCapacity = newCapacity;
+        releaseRange(freeVertexRanges, oldCapacity, newCapacity - oldCapacity);
         configureVertexArray();
+        glDeleteBuffers(1, &oldVbo);
+        return true;
     }
 
-    void growIndexStorage(size_t required) {
+    bool growIndexStorage(size_t required) {
         size_t oldCapacity = indexCapacity;
-        size_t newCapacity = std::max(required, std::max<size_t>(1, oldCapacity * 2));
-        releaseRange(freeIndexRanges, oldCapacity, newCapacity - oldCapacity);
+        if (oldCapacity > std::numeric_limits<size_t>::max() / 2) return false;
+        size_t newCapacity = std::max(required, oldCapacity * 2);
 
         GLuint oldEbo = ebo;
         GLuint newEbo = 0;
         glGenBuffers(1, &newEbo);
         glBindBuffer(GL_COPY_WRITE_BUFFER, newEbo);
+        while (glGetError() != GL_NO_ERROR);
+
         glBufferData(
             GL_COPY_WRITE_BUFFER,
             static_cast<GLsizeiptr>(newCapacity * sizeof(uint32_t)),
             nullptr,
             GL_DYNAMIC_DRAW
         );
+        if (glGetError() != GL_NO_ERROR) {
+            glDeleteBuffers(1, &newEbo);
+            return false;
+        }
+
         glBindBuffer(GL_COPY_READ_BUFFER, oldEbo);
         glCopyBufferSubData(
             GL_COPY_READ_BUFFER,
@@ -226,12 +248,18 @@ private:
             0,
             static_cast<GLsizeiptr>(oldCapacity * sizeof(uint32_t))
         );
-        glDeleteBuffers(1, &oldEbo);
+        if (glGetError() != GL_NO_ERROR) {
+            glDeleteBuffers(1, &newEbo);
+            return false;
+        }
+
         ebo = newEbo;
         indexCapacity = newCapacity;
+        releaseRange(freeIndexRanges, oldCapacity, newCapacity - oldCapacity);
         configureVertexArray();
+        glDeleteBuffers(1, &oldEbo);
+        return true;
     }
-
     void uploadBufferRange(
         GLenum target,
         GLuint buffer,
@@ -263,9 +291,10 @@ public:
         glGenVertexArrays(1, &vao);
         glGenBuffers(1, &vbo);
         glGenBuffers(1, &ebo);
-        glGenBuffers(1, &metadataBuffer);
-        glGenBuffers(1, &indirectBuffer);
-        glGenBuffers(1, &nodeBuffer);
+        for (size_t i = 0; i < NUM_FRAME_CONTEXTS; ++i) {
+            glGenBuffers(1, &frameContexts[i].metadataBuffer);
+            glGenBuffers(1, &frameContexts[i].indirectBuffer);
+        }
         glGenBuffers(1, &rootBuffer);
         glGenBuffers(1, &childLinkBuffer);
         glGenBuffers(1, &traversalQueueA);
@@ -297,19 +326,24 @@ public:
         for (size_t i = 0; i < NUM_FRAME_CONTEXTS; ++i) {
             if (frameContexts[i].fence) glDeleteSync(frameContexts[i].fence);
             frameContexts[i].fence = 0;
+            if (frameContexts[i].metadataBuffer) glDeleteBuffers(1, &frameContexts[i].metadataBuffer);
+            if (frameContexts[i].indirectBuffer) glDeleteBuffers(1, &frameContexts[i].indirectBuffer);
+            frameContexts[i].metadataBuffer = 0;
+            frameContexts[i].indirectBuffer = 0;
+            frameContexts[i].metadataCapacityBytes = 0;
+            frameContexts[i].indirectCapacityBytes = 0;
             frameContexts[i].retiredGeometry.clear();
         }
         if (traversalCounterBuffer) glDeleteBuffers(1, &traversalCounterBuffer);
         if (traversalQueueB) glDeleteBuffers(1, &traversalQueueB);
         if (traversalQueueA) glDeleteBuffers(1, &traversalQueueA);
+        if (childLinkBuffer) glDeleteBuffers(1, &childLinkBuffer);
         if (rootBuffer) glDeleteBuffers(1, &rootBuffer);
         if (nodeBuffer) glDeleteBuffers(1, &nodeBuffer);
-        if (indirectBuffer) glDeleteBuffers(1, &indirectBuffer);
-        if (metadataBuffer) glDeleteBuffers(1, &metadataBuffer);
         if (ebo) glDeleteBuffers(1, &ebo);
         if (vbo) glDeleteBuffers(1, &vbo);
         if (vao) glDeleteVertexArrays(1, &vao);
-        vao = vbo = ebo = metadataBuffer = indirectBuffer = 0;
+        vao = vbo = ebo = 0;
         nodeBuffer = rootBuffer = childLinkBuffer = 0;
         traversalQueueA = traversalQueueB = traversalCounterBuffer = 0;
         initialized = false;
@@ -317,8 +351,6 @@ public:
         indexCapacity = 0;
         freeVertexRanges.clear();
         freeIndexRanges.clear();
-        metadataCapacityBytes = 0;
-        indirectCapacityBytes = 0;
         nodeCapacityBytes = 0;
         rootCapacityBytes = 0;
         childLinkCapacityBytes = 0;
@@ -349,23 +381,6 @@ public:
         ctx.retiredGeometry.clear();
     }
 
-    void waitForSubmittedWork() {
-        for (size_t i = 0; i < NUM_FRAME_CONTEXTS; ++i) {
-            if (frameContexts[i].fence) {
-                for (;;) {
-                    GLenum result = glClientWaitSync(frameContexts[i].fence, GL_SYNC_FLUSH_COMMANDS_BIT, 1000000);
-                    if (result == GL_ALREADY_SIGNALED || result == GL_CONDITION_SATISFIED) break;
-                    if (result == GL_WAIT_FAILED) {
-                        glFinish();
-                        break;
-                    }
-                }
-                glDeleteSync(frameContexts[i].fence);
-                frameContexts[i].fence = 0;
-            }
-        }
-    }
-
     void markSubmitted() {
         FrameContext& ctx = frameContexts[frameIndex];
         if (ctx.fence) glDeleteSync(ctx.fence);
@@ -375,21 +390,25 @@ public:
     GeometryHandle upload(const std::vector<VoxelVertex>& vertices, const std::vector<uint32_t>& indices) {
         GeometryHandle handle;
         if (!initialized || vertices.empty() || indices.empty()) return handle;
+        if (vertices.size() > std::numeric_limits<uint32_t>::max() ||
+            indices.size() > std::numeric_limits<uint32_t>::max()) return handle;
 
         size_t vertexStart = allocateRange(freeVertexRanges, vertices.size());
         if (vertexStart == std::numeric_limits<size_t>::max()) {
-            growVertexStorage(vertexCapacity + vertices.size());
+            if (!growVertexStorage(vertexCapacity + vertices.size())) return handle;
             vertexStart = allocateRange(freeVertexRanges, vertices.size());
         }
 
         size_t indexStart = allocateRange(freeIndexRanges, indices.size());
         if (indexStart == std::numeric_limits<size_t>::max()) {
-            growIndexStorage(indexCapacity + indices.size());
+            if (!growIndexStorage(indexCapacity + indices.size())) return handle;
             indexStart = allocateRange(freeIndexRanges, indices.size());
         }
 
         if (vertexStart == std::numeric_limits<size_t>::max() ||
-            indexStart == std::numeric_limits<size_t>::max()) {
+            indexStart == std::numeric_limits<size_t>::max() ||
+            vertexStart > static_cast<size_t>(std::numeric_limits<int32_t>::max()) ||
+            indexStart > std::numeric_limits<uint32_t>::max()) {
             if (vertexStart != std::numeric_limits<size_t>::max()) {
                 releaseRange(freeVertexRanges, vertexStart, vertices.size());
             }
@@ -442,23 +461,24 @@ public:
         const std::vector<DrawElementsIndirectCommand>& commands
     ) {
         if (!initialized || metadata.size() != commands.size()) return;
+        FrameContext& ctx = frameContexts[frameIndex];
 
         size_t metadataBytes = metadata.size() * sizeof(SectionGpuMetadata);
         size_t indirectBytes = commands.size() * sizeof(DrawElementsIndirectCommand);
 
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, metadataBuffer);
-        if (metadataBytes > metadataCapacityBytes) {
-            metadataCapacityBytes = std::max(metadataBytes, std::max<size_t>(sizeof(SectionGpuMetadata), metadataCapacityBytes * 2));
-            glBufferData(GL_SHADER_STORAGE_BUFFER, static_cast<GLsizeiptr>(metadataCapacityBytes), nullptr, GL_STREAM_DRAW);
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, ctx.metadataBuffer);
+        if (metadataBytes > ctx.metadataCapacityBytes) {
+            ctx.metadataCapacityBytes = std::max(metadataBytes, std::max<size_t>(sizeof(SectionGpuMetadata), ctx.metadataCapacityBytes * 2));
+            glBufferData(GL_SHADER_STORAGE_BUFFER, static_cast<GLsizeiptr>(ctx.metadataCapacityBytes), nullptr, GL_STREAM_DRAW);
         }
         if (metadataBytes > 0) {
             glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, static_cast<GLsizeiptr>(metadataBytes), metadata.data());
         }
 
-        glBindBuffer(GL_DRAW_INDIRECT_BUFFER, indirectBuffer);
-        if (indirectBytes > indirectCapacityBytes) {
-            indirectCapacityBytes = std::max(indirectBytes, std::max<size_t>(sizeof(DrawElementsIndirectCommand), indirectCapacityBytes * 2));
-            glBufferData(GL_DRAW_INDIRECT_BUFFER, static_cast<GLsizeiptr>(indirectCapacityBytes), nullptr, GL_STREAM_DRAW);
+        glBindBuffer(GL_DRAW_INDIRECT_BUFFER, ctx.indirectBuffer);
+        if (indirectBytes > ctx.indirectCapacityBytes) {
+            ctx.indirectCapacityBytes = std::max(indirectBytes, std::max<size_t>(sizeof(DrawElementsIndirectCommand), ctx.indirectCapacityBytes * 2));
+            glBufferData(GL_DRAW_INDIRECT_BUFFER, static_cast<GLsizeiptr>(ctx.indirectCapacityBytes), nullptr, GL_STREAM_DRAW);
         }
         if (indirectBytes > 0) {
             glBufferSubData(GL_DRAW_INDIRECT_BUFFER, 0, static_cast<GLsizeiptr>(indirectBytes), commands.data());
@@ -642,9 +662,10 @@ public:
 
     void drawIndirect(size_t commandCount) const {
         if (!initialized || commandCount == 0) return;
+        const FrameContext& ctx = frameContexts[frameIndex];
         glBindVertexArray(vao);
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, metadataBuffer);
-        glBindBuffer(GL_DRAW_INDIRECT_BUFFER, indirectBuffer);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, ctx.metadataBuffer);
+        glBindBuffer(GL_DRAW_INDIRECT_BUFFER, ctx.indirectBuffer);
         glMultiDrawElementsIndirect(
             GL_TRIANGLES,
             GL_UNSIGNED_INT,

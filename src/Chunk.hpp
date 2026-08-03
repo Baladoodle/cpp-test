@@ -42,13 +42,12 @@ struct Chunk {
 
     uint8_t blocks[CHUNK_VOL];
     uint16_t light[CHUNK_VOL];
-    std::vector<uint8_t> paddedBlocks;
-    std::vector<uint16_t> paddedLight;
     bool isEmpty = true;
     std::atomic<bool> isGenerated{false};
     std::atomic<bool> isMeshStaged{false};
     std::atomic<bool> isMeshUploaded{false};
     std::atomic<bool> isPendingWork{true};
+    std::atomic<bool> resident{true};
     std::atomic<bool> mipRemeshQueued{false};
     std::atomic<uint64_t> workToken{0};
     std::atomic<uint64_t> mipRevision{0};
@@ -75,9 +74,7 @@ struct Chunk {
     }
 
     inline uint8_t getPaddedBlock(int x, int y, int z) const {
-        if (paddedBlocks.empty()) return getBlock(x, y, z);
-        if (x < -1 || x > CHUNK_SIZE || y < -1 || y > CHUNK_SIZE || z < -1 || z > CHUNK_SIZE) return BLOCK_AIR;
-        return paddedBlocks[getPaddedVoxelIndex(x, y, z)];
+        return getBlock(x, y, z);
     }
 
     inline void setBlock(int x, int y, int z, uint8_t b) {
@@ -96,15 +93,7 @@ struct Chunk {
     }
 
     inline uint16_t getPaddedLight(int x, int y, int z) const {
-        if (paddedLight.empty()) return getLight(x, y, z);
-        if (x < -1 || x > CHUNK_SIZE || y < -1 || y > CHUNK_SIZE || z < -1 || z > CHUNK_SIZE) return 0;
-        return paddedLight[getPaddedVoxelIndex(x, y, z)];
-    }
-
-    inline void setPaddedLight(int x, int y, int z, uint16_t l) {
-        if (paddedLight.empty()) return;
-        if (x < -1 || x > CHUNK_SIZE || y < -1 || y > CHUNK_SIZE || z < -1 || z > CHUNK_SIZE) return;
-        paddedLight[getPaddedVoxelIndex(x, y, z)] = l;
+        return getLight(x, y, z);
     }
 };
 

@@ -17,22 +17,47 @@ private:
         int8_t x, y, z;
     };
 
+    struct MeshScratch {
+        std::vector<uint8_t> paddedBlocks;
+        std::vector<uint16_t> paddedLight;
+        std::vector<LightNode> lightQueue;
+    };
+
+    inline static thread_local MeshScratch threadScratch;
+
+    inline static uint8_t getScratchPaddedBlock(const Chunk& chunk, int x, int y, int z) {
+        if (threadScratch.paddedBlocks.empty()) return chunk.getBlock(x, y, z);
+        if (x < -1 || x > CHUNK_SIZE || y < -1 || y > CHUNK_SIZE || z < -1 || z > CHUNK_SIZE) return BLOCK_AIR;
+        return threadScratch.paddedBlocks[getPaddedVoxelIndex(x, y, z)];
+    }
+
+    inline static uint16_t getScratchPaddedLight(const Chunk& chunk, int x, int y, int z) {
+        if (threadScratch.paddedLight.empty()) return chunk.getLight(x, y, z);
+        if (x < -1 || x > CHUNK_SIZE || y < -1 || y > CHUNK_SIZE || z < -1 || z > CHUNK_SIZE) return 0;
+        return threadScratch.paddedLight[getPaddedVoxelIndex(x, y, z)];
+    }
+
+    inline static void setScratchPaddedLight(int x, int y, int z, uint16_t l) {
+        if (threadScratch.paddedLight.empty()) return;
+        if (x < -1 || x > CHUNK_SIZE || y < -1 || y > CHUNK_SIZE || z < -1 || z > CHUNK_SIZE) return;
+        threadScratch.paddedLight[getPaddedVoxelIndex(x, y, z)] = l;
+    }
+
     static void propagateLight3D(Chunk& chunk) {
         if (chunk.isEmpty) return;
 
-        chunk.paddedLight.assign(PADDED_VOL, 0);
+        threadScratch.paddedLight.assign(PADDED_VOL, 0);
 
-        thread_local std::vector<LightNode> lightQueue;
-        lightQueue.clear();
-        lightQueue.reserve(4096);
+        threadScratch.lightQueue.clear();
+        threadScratch.lightQueue.reserve(4096);
         for (int z = -1; z <= CHUNK_SIZE; ++z) {
             for (int x = -1; x <= CHUNK_SIZE; ++x) {
-                uint8_t topBlock = chunk.getPaddedBlock(x, CHUNK_SIZE, z);
+                uint8_t topBlock = getScratchPaddedBlock(chunk, x, CHUNK_SIZE, z);
                 bool openSky = getBlockInfo(topBlock).isTransparent;
                 uint8_t skyVal = openSky ? 15 : 0;
 
                 for (int y = CHUNK_SIZE; y >= -1; --y) {
-                    uint8_t block = chunk.getPaddedBlock(x, y, z);
+                    uint8_t block = getScratchPaddedBlock(chunk, x, y, z);
                     const BlockInfo& info = getBlockInfo(block);
 
                     if (!info.isTransparent) {
@@ -55,8 +80,8 @@ private:
                     }
 
                     if (r > 0 || g > 0 || b > 0 || sky > 0) {
-                        chunk.setPaddedLight(x, y, z, packLight(r, g, b, sky));
-                        lightQueue.push_back({static_cast<int8_t>(x), static_cast<int8_t>(y), static_cast<int8_t>(z)});
+                        setScratchPaddedLight(x, y, z, packLight(r, g, b, sky));
+                        threadScratch.lightQueue.push_back({static_cast<int8_t>(x), static_cast<int8_t>(y), static_cast<int8_t>(z)});
                     }
                 }
             }
@@ -67,9 +92,9 @@ private:
         const int dz[6] = { 0,  0,  0,  0,  1, -1 };
 
         size_t head = 0;
-        while (head < lightQueue.size()) {
-            LightNode curr = lightQueue[head++];
-            uint16_t currLight = chunk.getPaddedLight(curr.x, curr.y, curr.z);
+        while (head < threadScratch.lightQueue.size()) {
+            LightNode curr = threadScratch.lightQueue[head++];
+            uint16_t currLight = getScratchPaddedLight(chunk, curr.x, curr.y, curr.z);
             uint8_t cr = getLightR(currLight);
             uint8_t cg = getLightG(currLight);
             uint8_t cb = getLightB(currLight);
@@ -83,10 +108,10 @@ private:
                 if (nx < -1 || nx > CHUNK_SIZE || ny < -1 || ny > CHUNK_SIZE || nz < -1 || nz > CHUNK_SIZE)
                     continue;
 
-                uint8_t nBlock = chunk.getPaddedBlock(nx, ny, nz);
+                uint8_t nBlock = getScratchPaddedBlock(chunk, nx, ny, nz);
                 if (!getBlockInfo(nBlock).isTransparent) continue;
 
-                uint16_t nLight = chunk.getPaddedLight(nx, ny, nz);
+                uint16_t nLight = getScratchPaddedLight(chunk, nx, ny, nz);
                 uint8_t nr = getLightR(nLight);
                 uint8_t ng = getLightG(nLight);
                 uint8_t nb = getLightB(nLight);
@@ -104,8 +129,8 @@ private:
                 if (tsky > nsky) { nsky = tsky; updated = true; }
 
                 if (updated) {
-                    chunk.setPaddedLight(nx, ny, nz, packLight(nr, ng, nb, nsky));
-                    lightQueue.push_back({static_cast<int8_t>(nx), static_cast<int8_t>(ny), static_cast<int8_t>(nz)});
+                    setScratchPaddedLight(nx, ny, nz, packLight(nr, ng, nb, nsky));
+                    threadScratch.lightQueue.push_back({static_cast<int8_t>(nx), static_cast<int8_t>(ny), static_cast<int8_t>(nz)});
                 }
             }
         }
@@ -113,7 +138,7 @@ private:
         for (int y = 0; y < CHUNK_SIZE; ++y) {
             for (int z = 0; z < CHUNK_SIZE; ++z) {
                 for (int x = 0; x < CHUNK_SIZE; ++x) {
-                    chunk.setLight(x, y, z, chunk.getPaddedLight(x, y, z));
+                    chunk.setLight(x, y, z, getScratchPaddedLight(chunk, x, y, z));
                 }
             }
         }
@@ -144,8 +169,8 @@ public:
 
         chunk.isEmpty = !hasSolid;
         if (chunk.isEmpty) {
-            chunk.paddedBlocks.clear();
-            chunk.paddedLight.clear();
+            threadScratch.paddedBlocks.clear();
+            threadScratch.paddedLight.clear();
             std::fill(chunk.light, chunk.light + CHUNK_VOL, 0);
             chunk.isGenerated = true;
             return;
@@ -155,7 +180,7 @@ public:
         int64_t wmx = chunk.worldMin.x;
         int64_t wmy = chunk.worldMin.y;
         int64_t wmz = chunk.worldMin.z;
-        chunk.paddedBlocks.resize(PADDED_VOL);
+        threadScratch.paddedBlocks.resize(PADDED_VOL);
 
         constexpr int GRID_DX = CHUNK_SIZE + 7; // 39
         constexpr int GRID_DZ = CHUNK_SIZE + 7; // 39
@@ -217,7 +242,7 @@ public:
                         int64_t wz = wmz + z * scale + scale / 2;
                         block = WorldGen::getBlockAt(wx, wy, wz, scale);
                     }
-                    chunk.paddedBlocks[getPaddedVoxelIndex(x, y, z)] = block;
+                    threadScratch.paddedBlocks[getPaddedVoxelIndex(x, y, z)] = block;
                 }
             }
         }
