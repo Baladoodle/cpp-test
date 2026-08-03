@@ -44,22 +44,33 @@ private:
 
     static uint8_t chooseRepresentative(const uint8_t* childBlocks, int x, int y, int z) {
         int counts[BLOCK_COUNT] = {};
+        int totalSolid = 0;
         for (int dz = 0; dz < 2; ++dz) {
             for (int dy = 0; dy < 2; ++dy) {
                 for (int dx = 0; dx < 2; ++dx) {
                     int index = getVoxelIndex(x * 2 + dx, y * 2 + dy, z * 2 + dz);
                     uint8_t block = childBlocks[index];
-                    if (block < BLOCK_COUNT) ++counts[block];
+                    if (block < BLOCK_COUNT) {
+                        ++counts[block];
+                        if (getBlockInfo(block).isSolid) ++totalSolid;
+                    }
                 }
             }
         }
 
         uint8_t best = BLOCK_AIR;
-        for (uint8_t block = 1; block < BLOCK_COUNT; ++block) {
-            if (counts[block] > counts[best] ||
-                (counts[block] == counts[best] && counts[block] > 0 &&
-                 getBlockInfo(block).isSolid && !getBlockInfo(best).isSolid)) {
-                best = block;
+        if (totalSolid >= 2) {
+            for (uint8_t block = 1; block < BLOCK_COUNT; ++block) {
+                if (getBlockInfo(block).isSolid && counts[block] > counts[best]) {
+                    best = block;
+                }
+            }
+        }
+        if (best == BLOCK_AIR) {
+            for (uint8_t block = 1; block < BLOCK_COUNT; ++block) {
+                if (counts[block] > counts[best]) {
+                    best = block;
+                }
             }
         }
         return best;
@@ -128,6 +139,30 @@ public:
         std::memcpy(blocks, it->second.blocks.data(), CHUNK_VOL * sizeof(uint8_t));
         if (revision) *revision = it->second.revision;
         return true;
+    }
+    uint8_t readVoxel(int lod, const IVec3& chunkPos, int localX, int localY, int localZ) const {
+        if (lod < 0 || lod >= NUM_LEVELS) return BLOCK_AIR;
+
+        int64_t cx = chunkPos.x;
+        int64_t cy = chunkPos.y;
+        int64_t cz = chunkPos.z;
+
+        if (localX < 0) { cx -= 1; localX += CHUNK_SIZE; }
+        else if (localX >= CHUNK_SIZE) { cx += 1; localX -= CHUNK_SIZE; }
+
+        if (localY < 0) { cy -= 1; localY += CHUNK_SIZE; }
+        else if (localY >= CHUNK_SIZE) { cy += 1; localY -= CHUNK_SIZE; }
+
+        if (localZ < 0) { cz -= 1; localZ += CHUNK_SIZE; }
+        else if (localZ >= CHUNK_SIZE) { cz += 1; localZ -= CHUNK_SIZE; }
+
+        std::lock_guard<std::mutex> lock(mutex);
+        IVec3 targetPos(cx, cy, cz);
+        auto it = levels[lod].find(targetPos);
+        if (it != levels[lod].end()) {
+            return it->second.blocks[getVoxelIndex(localX, localY, localZ)];
+        }
+        return BLOCK_AIR;
     }
 
     std::vector<CompletedSection> drainCompleted() {

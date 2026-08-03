@@ -82,7 +82,13 @@ private:
     GLuint traversalQueueA = 0;
     GLuint traversalQueueB = 0;
     GLuint traversalCounterBuffer = 0;
-    GLsync lastSubmittedFence = 0;
+    static constexpr size_t NUM_FRAME_CONTEXTS = 3;
+    struct FrameContext {
+        GLsync fence = 0;
+        std::vector<GeometryHandle> retiredGeometry;
+    };
+    FrameContext frameContexts[NUM_FRAME_CONTEXTS];
+    size_t frameIndex = 0;
     bool initialized = false;
 
     size_t vertexCapacity = 0;
@@ -288,9 +294,11 @@ public:
     }
 
     void cleanUp() {
-        if (lastSubmittedFence) glDeleteSync(lastSubmittedFence);
-        lastSubmittedFence = 0;
-        if (childLinkBuffer) glDeleteBuffers(1, &childLinkBuffer);
+        for (size_t i = 0; i < NUM_FRAME_CONTEXTS; ++i) {
+            if (frameContexts[i].fence) glDeleteSync(frameContexts[i].fence);
+            frameContexts[i].fence = 0;
+            frameContexts[i].retiredGeometry.clear();
+        }
         if (traversalCounterBuffer) glDeleteBuffers(1, &traversalCounterBuffer);
         if (traversalQueueB) glDeleteBuffers(1, &traversalQueueB);
         if (traversalQueueA) glDeleteBuffers(1, &traversalQueueA);
@@ -317,23 +325,51 @@ public:
         traversalQueueCapacityBytes = 0;
     }
 
-    void waitForSubmittedWork() {
-        if (!lastSubmittedFence) return;
-        for (;;) {
-            GLenum result = glClientWaitSync(lastSubmittedFence, GL_SYNC_FLUSH_COMMANDS_BIT, 1000000);
-            if (result == GL_ALREADY_SIGNALED || result == GL_CONDITION_SATISFIED) break;
-            if (result == GL_WAIT_FAILED) {
-                glFinish();
-                break;
+    void advanceFrame() {
+        frameIndex = (frameIndex + 1) % NUM_FRAME_CONTEXTS;
+        FrameContext& ctx = frameContexts[frameIndex];
+        if (ctx.fence) {
+            for (;;) {
+                GLenum result = glClientWaitSync(ctx.fence, GL_SYNC_FLUSH_COMMANDS_BIT, 1000000);
+                if (result == GL_ALREADY_SIGNALED || result == GL_CONDITION_SATISFIED) break;
+                if (result == GL_WAIT_FAILED) {
+                    glFinish();
+                    break;
+                }
+            }
+            glDeleteSync(ctx.fence);
+            ctx.fence = 0;
+        }
+        for (const GeometryHandle& handle : ctx.retiredGeometry) {
+            if (handle.valid) {
+                releaseRange(freeVertexRanges, handle.vertexOffset, handle.vertexCount);
+                releaseRange(freeIndexRanges, handle.indexOffset, handle.indexCount);
             }
         }
-        glDeleteSync(lastSubmittedFence);
-        lastSubmittedFence = 0;
+        ctx.retiredGeometry.clear();
+    }
+
+    void waitForSubmittedWork() {
+        for (size_t i = 0; i < NUM_FRAME_CONTEXTS; ++i) {
+            if (frameContexts[i].fence) {
+                for (;;) {
+                    GLenum result = glClientWaitSync(frameContexts[i].fence, GL_SYNC_FLUSH_COMMANDS_BIT, 1000000);
+                    if (result == GL_ALREADY_SIGNALED || result == GL_CONDITION_SATISFIED) break;
+                    if (result == GL_WAIT_FAILED) {
+                        glFinish();
+                        break;
+                    }
+                }
+                glDeleteSync(frameContexts[i].fence);
+                frameContexts[i].fence = 0;
+            }
+        }
     }
 
     void markSubmitted() {
-        if (lastSubmittedFence) glDeleteSync(lastSubmittedFence);
-        lastSubmittedFence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+        FrameContext& ctx = frameContexts[frameIndex];
+        if (ctx.fence) glDeleteSync(ctx.fence);
+        ctx.fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
     }
 
     GeometryHandle upload(const std::vector<VoxelVertex>& vertices, const std::vector<uint32_t>& indices) {
@@ -391,6 +427,11 @@ public:
     }
 
     void release(const GeometryHandle& handle) {
+        if (!handle.valid) return;
+        frameContexts[frameIndex].retiredGeometry.push_back(handle);
+    }
+
+    void releaseImmediate(const GeometryHandle& handle) {
         if (!handle.valid) return;
         releaseRange(freeVertexRanges, handle.vertexOffset, handle.vertexCount);
         releaseRange(freeIndexRanges, handle.indexOffset, handle.indexCount);

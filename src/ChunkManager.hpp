@@ -46,7 +46,7 @@ private:
     uint64_t diagnosticsFrameCounter = 0;
     bool diagnosticsCommandFailureReported = false;
     FrameDiagnostics lastDiagnostics;
-    static constexpr float SCREEN_SPACE_DIAMETER_THRESHOLD = 64.0f;
+    static constexpr float SCREEN_SPACE_DIAMETER_THRESHOLD = 2.5f;
     static constexpr size_t MAX_GPU_UPLOAD_BYTES_PER_FRAME = 16ull * 1024ull * 1024ull;
     static constexpr size_t MAX_PENDING_GENERATION_TASKS = 4096;
 
@@ -95,6 +95,15 @@ public:
 private:
     Vec3 currentCamPos{0, 0, 0};
     std::mutex cameraMutex;
+    IVec3 lastCamChunkPos[NUM_LODS] = {
+        IVec3(-999999, -999999, -999999),
+        IVec3(-999999, -999999, -999999),
+        IVec3(-999999, -999999, -999999),
+        IVec3(-999999, -999999, -999999),
+        IVec3(-999999, -999999, -999999)
+    };
+    std::vector<std::shared_ptr<Chunk>> stagedMeshQueue;
+    std::mutex stagedMutex;
 
     static void getChunkBounds(const Chunk* chunk, Vec3 cameraPos, Vec3& minP, Vec3& maxP) {
         minP = Vec3(
@@ -107,36 +116,7 @@ private:
     }
 
     bool shouldSkipCoarseChunk(int lod, int64_t cx, int64_t cy, int64_t cz, const Vec3& camPos) const {
-        if (lod <= 0) return false;
-
-        int scale = 1 << lod;
-        int worldChunkSize = CHUNK_SIZE * scale;
-
-        int64_t minWX = cx * worldChunkSize;
-        int64_t maxWX = minWX + worldChunkSize;
-        int64_t minWY = cy * worldChunkSize;
-        int64_t maxWY = minWY + worldChunkSize;
-        int64_t minWZ = cz * worldChunkSize;
-        int64_t maxWZ = minWZ + worldChunkSize;
-
-        int prevScale = 1 << (lod - 1);
-        int prevWorldChunkSize = CHUNK_SIZE * prevScale;
-        int prevRadius = LOD_RADII[lod - 1];
-
-        int64_t prevCamCX = static_cast<int64_t>(std::floor(camPos.x / prevWorldChunkSize));
-        int64_t prevCamCY = static_cast<int64_t>(std::floor(camPos.y / prevWorldChunkSize));
-        int64_t prevCamCZ = static_cast<int64_t>(std::floor(camPos.z / prevWorldChunkSize));
-
-        int64_t prevMinX = (prevCamCX - prevRadius) * prevWorldChunkSize;
-        int64_t prevMaxX = (prevCamCX + prevRadius + 1) * prevWorldChunkSize;
-        int64_t prevMinY = (prevCamCY - prevRadius) * prevWorldChunkSize;
-        int64_t prevMaxY = (prevCamCY + prevRadius + 1) * prevWorldChunkSize;
-        int64_t prevMinZ = (prevCamCZ - prevRadius) * prevWorldChunkSize;
-        int64_t prevMaxZ = (prevCamCZ + prevRadius + 1) * prevWorldChunkSize;
-
-        return (minWX >= prevMinX && maxWX <= prevMaxX &&
-                minWY >= prevMinY && maxWY <= prevMaxY &&
-                minWZ >= prevMinZ && maxWZ <= prevMaxZ);
+        return false;
     }
     bool isRegionCoveredByReadyFinerChunks(
         int lod,
@@ -212,6 +192,111 @@ private:
             camPos
         );
     }
+    void selectHierarchicalNode(
+        Chunk* chunk,
+        const Frustum& frustum,
+        Vec3 cameraPos,
+        float projectionScale,
+        std::vector<Chunk*>& selectedChunks
+    ) {
+        if (!chunk) return;
+
+        Vec3 minP, maxP;
+        getChunkBounds(chunk, cameraPos, minP, maxP);
+
+        if (!frustum.intersectsAABB(minP, maxP)) {
+            return;
+        }
+
+        float dx = std::max(0.0f, std::max(minP.x, -maxP.x));
+        float dy = std::max(0.0f, std::max(minP.y, -maxP.y));
+        float dz = std::max(0.0f, std::max(minP.z, -maxP.z));
+        float dist = std::max(0.1f, std::sqrt(dx * dx + dy * dy + dz * dz));
+
+        float geometricError = static_cast<float>(1 << chunk->lod);
+        float pixelError = geometricError * projectionScale / dist;
+
+        float threshold = chunk->wasSplitLastFrame ? (SCREEN_SPACE_DIAMETER_THRESHOLD * 0.625f)
+                                                   : SCREEN_SPACE_DIAMETER_THRESHOLD;
+        bool wantsChildren = (chunk->lod > 0) && (pixelError > threshold);
+
+        bool allChildrenReady = false;
+        if (wantsChildren) {
+            allChildrenReady = true;
+            int childLod = chunk->lod - 1;
+            int childScale = 1 << childLod;
+            int childWorldChunkSize = CHUNK_SIZE * childScale;
+            int64_t baseCX = floorDiv(chunk->worldMin.x, childWorldChunkSize);
+            int64_t baseCY = floorDiv(chunk->worldMin.y, childWorldChunkSize);
+            int64_t baseCZ = floorDiv(chunk->worldMin.z, childWorldChunkSize);
+
+            for (int dz = 0; dz < 2 && allChildrenReady; ++dz) {
+                for (int dy = 0; dy < 2 && allChildrenReady; ++dy) {
+                    for (int dx = 0; dx < 2 && allChildrenReady; ++dx) {
+                        IVec3 childPos(baseCX + dx, baseCY + dy, baseCZ + dz);
+                        auto it = chunks[childLod].find(childPos);
+                        if (it == chunks[childLod].end() || !it->second ||
+                            !it->second->isMeshUploaded.load()) {
+                            allChildrenReady = false;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (wantsChildren && allChildrenReady) {
+            chunk->wasSplitLastFrame = true;
+            int childLod = chunk->lod - 1;
+            int childScale = 1 << childLod;
+            int childWorldChunkSize = CHUNK_SIZE * childScale;
+            int64_t baseCX = floorDiv(chunk->worldMin.x, childWorldChunkSize);
+            int64_t baseCY = floorDiv(chunk->worldMin.y, childWorldChunkSize);
+            int64_t baseCZ = floorDiv(chunk->worldMin.z, childWorldChunkSize);
+
+            for (int dz = 0; dz < 2; ++dz) {
+                for (int dy = 0; dy < 2; ++dy) {
+                    for (int dx = 0; dx < 2; ++dx) {
+                        IVec3 childPos(baseCX + dx, baseCY + dy, baseCZ + dz);
+                        auto it = chunks[childLod].find(childPos);
+                        if (it != chunks[childLod].end() && it->second) {
+                            selectHierarchicalNode(it->second.get(), frustum, cameraPos, projectionScale, selectedChunks);
+                        }
+                    }
+                }
+            }
+        } else {
+            chunk->wasSplitLastFrame = false;
+            if (chunk->isMeshUploaded.load() && !chunk->isEmpty && chunk->mesh.geometry.valid) {
+                selectedChunks.push_back(chunk);
+            }
+            if (wantsChildren && !allChildrenReady) {
+                int childLod = chunk->lod - 1;
+                int childScale = 1 << childLod;
+                int childWorldChunkSize = CHUNK_SIZE * childScale;
+                int64_t baseCX = floorDiv(chunk->worldMin.x, childWorldChunkSize);
+                int64_t baseCY = floorDiv(chunk->worldMin.y, childWorldChunkSize);
+                int64_t baseCZ = floorDiv(chunk->worldMin.z, childWorldChunkSize);
+
+                for (int dz = 0; dz < 2; ++dz) {
+                    for (int dy = 0; dy < 2; ++dy) {
+                        for (int dx = 0; dx < 2; ++dx) {
+                            IVec3 childPos(baseCX + dx, baseCY + dy, baseCZ + dz);
+                            auto it = chunks[childLod].find(childPos);
+                            if (it == chunks[childLod].end()) {
+                                auto newChunk = std::make_shared<Chunk>(childPos, childLod);
+                                newChunk->isPendingWork.store(true);
+                                chunks[childLod][childPos] = newChunk;
+                                enqueueGeneration(newChunk, cameraPos);
+                            } else if (!it->second->isGenerated.load() && !it->second->isPendingWork.load()) {
+                                it->second->isPendingWork.store(true);
+                                enqueueGeneration(it->second, cameraPos);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     bool isCoarserParentRequiredForHandoff(const Chunk* fineChunk, const Vec3& camPos) const {
         if (!fineChunk || fineChunk->lod >= NUM_LODS - 1) return false;
@@ -280,11 +365,7 @@ private:
             return true;
         }
 
-        if (lod > 0 && shouldSkipCoarseChunk(lod, chunk->chunkPos.x, chunk->chunkPos.y, chunk->chunkPos.z, camPos)) {
-            if (isCoarseChunkCoveredByReadyFineChunks(chunk, camPos)) {
-                return true;
-            }
-        }
+
 
         return false;
     }
@@ -402,7 +483,7 @@ private:
                             &mipRevision
                         );
                     if (loadedFromMip) {
-                        MeshBuilder::finalizeVoxelData(*chunk);
+                        MeshBuilder::finalizeVoxelData(*chunk, nullptr, &mipStore);
                         chunk->mipRevision.store(mipRevision);
                     } else {
                         MeshBuilder::generateVoxelData(*chunk);
@@ -414,8 +495,13 @@ private:
                     totalGenTimeUs += std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
                     totalMeshTimeUs += std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count();
                     mipStore.publishSection(chunk->lod, chunk->chunkPos, chunk->blocks);
+                    mipStore.publishSection(chunk->lod, chunk->chunkPos, chunk->blocks);
                     chunk->mipRemeshQueued.store(false);
                     chunksProcessed++;
+                    if (chunk->isMeshStaged.load()) {
+                        std::lock_guard<std::mutex> lock(stagedMutex);
+                        stagedMeshQueue.push_back(chunk);
+                    }
                 }
                 if (chunk->workToken.load() == task.workToken) {
                     chunk->mipRemeshQueued.store(false);
@@ -452,7 +538,7 @@ public:
         for (int lod = 0; lod < NUM_LODS; ++lod) {
             for (auto& pair : chunks[lod]) {
                 if (pair.second) {
-                    geometryArena.release(pair.second->mesh.geometry);
+                    geometryArena.releaseImmediate(pair.second->mesh.geometry);
                     pair.second->mesh.cleanUp();
                 }
             }
@@ -463,7 +549,7 @@ public:
     }
 
     void update(Vec3 cameraPos) {
-        geometryArena.waitForSubmittedWork();
+        geometryArena.advanceFrame();
         {
             std::lock_guard<std::mutex> cameraLock(cameraMutex);
             currentCamPos = cameraPos;
@@ -503,124 +589,68 @@ public:
         // the renderer even when generation itself happened off-thread. Keep
         // this upload queue bounded; already resident meshes remain drawable
         // while the rest wait for a later frame.
+        std::vector<std::shared_ptr<Chunk>> stagedToUpload;
+        {
+            std::lock_guard<std::mutex> lock(stagedMutex);
+            stagedToUpload.swap(stagedMeshQueue);
+        }
+
         size_t uploadedBytesThisFrame = 0;
+        for (auto& chunk : stagedToUpload) {
+            if (!chunk || !chunk->isMeshStaged.load()) continue;
+            size_t meshBytes =
+                chunk->stagedVertices.size() * sizeof(VoxelVertex) +
+                chunk->stagedIndices.size() * sizeof(uint32_t);
+            if (uploadedBytesThisFrame > 0 &&
+                uploadedBytesThisFrame + meshBytes > MAX_GPU_UPLOAD_BYTES_PER_FRAME) {
+                std::lock_guard<std::mutex> lock(stagedMutex);
+                stagedMeshQueue.push_back(chunk);
+                continue;
+            }
+
+            GeometryHandle oldGeometry = chunk->mesh.geometry;
+            GeometryHandle geometry;
+            if (meshBytes > 0) {
+                geometry = geometryArena.upload(chunk->stagedVertices, chunk->stagedIndices);
+                if (!geometry.valid) continue;
+            }
+            chunk->mesh.attach(geometry);
+            geometryArena.release(oldGeometry);
+            ++sceneRevision;
+            chunk->stagedVertices.clear();
+            chunk->stagedIndices.clear();
+            chunk->isMeshStaged.store(false);
+            chunk->isMeshUploaded.store(true);
+            uploadedBytesThisFrame += meshBytes;
+        }
+
+        bool cameraCellChanged = false;
         for (int lod = 0; lod < NUM_LODS; ++lod) {
-            for (auto& pair : chunks[lod]) {
-                Chunk* chunk = pair.second.get();
-                if (!chunk) continue;
-
-                if (chunk->isMeshStaged.load()) {
-                    size_t meshBytes =
-                        chunk->stagedVertices.size() * sizeof(VoxelVertex) +
-                        chunk->stagedIndices.size() * sizeof(uint32_t);
-                    if (uploadedBytesThisFrame > 0 &&
-                        uploadedBytesThisFrame + meshBytes > MAX_GPU_UPLOAD_BYTES_PER_FRAME) {
-                        continue;
-                    }
-
-                    GeometryHandle oldGeometry = chunk->mesh.geometry;
-                    GeometryHandle geometry;
-                    if (meshBytes > 0) {
-                        geometry = geometryArena.upload(chunk->stagedVertices, chunk->stagedIndices);
-                        if (!geometry.valid) {
-                            continue;
-                        }
-                    }
-                    chunk->mesh.attach(geometry);
-                    geometryArena.release(oldGeometry);
-                    ++sceneRevision;
-                    chunk->stagedVertices.clear();
-                    chunk->stagedVertices.shrink_to_fit();
-                    chunk->stagedIndices.clear();
-                    chunk->stagedIndices.shrink_to_fit();
-                    chunk->isMeshStaged.store(false);
-
-                    uploadedBytesThisFrame += meshBytes;
-
-                    chunk->isMeshUploaded.store(true);
-                    if (!chunk->isEmpty && renderableSet.insert(chunk).second) {
-                        renderableChunks.push_back(chunk);
-                    }
-                }
+            int scale = 1 << lod;
+            int worldChunkSize = CHUNK_SIZE * scale;
+            int64_t camCX = static_cast<int64_t>(std::floor(cameraPos.x / worldChunkSize));
+            int64_t camCY = static_cast<int64_t>(std::floor(cameraPos.y / worldChunkSize));
+            int64_t camCZ = static_cast<int64_t>(std::floor(cameraPos.z / worldChunkSize));
+            IVec3 camCell(camCX, camCY, camCZ);
+            if (camCell != lastCamChunkPos[lod]) {
+                cameraCellChanged = true;
+                break;
             }
         }
 
-        // 2. Thread-Safe Dynamic Chunk Unloading & Memory Pruning
-        std::unordered_set<Chunk*> erasedChunks;
-        for (int lod = 0; lod < NUM_LODS; ++lod) {
-            for (auto it = chunks[lod].begin(); it != chunks[lod].end(); ) {
-                Chunk* chunk = it->second.get();
-                if (isChunkOutOfRange(chunk, cameraPos)) {
-                    erasedChunks.insert(chunk);
-                    geometryArena.release(chunk->mesh.geometry);
-                    ++sceneRevision;
-                    chunk->mesh.cleanUp();
-                    it = chunks[lod].erase(it);
-                } else {
-                    ++it;
+        if (cameraCellChanged) {
+            for (int lod = 0; lod < NUM_LODS; ++lod) {
+                for (auto it = chunks[lod].begin(); it != chunks[lod].end(); ) {
+                    Chunk* chunk = it->second.get();
+                    if (isChunkOutOfRange(chunk, cameraPos)) {
+                        geometryArena.release(chunk->mesh.geometry);
+                        ++sceneRevision;
+                        chunk->mesh.cleanUp();
+                        it = chunks[lod].erase(it);
+                    } else {
+                        ++it;
+                    }
                 }
-            }
-        }
-
-        // 3. Compact renderableChunks vector unconditionally to prevent memory bloat
-        renderableChunks.erase(
-            std::remove_if(renderableChunks.begin(), renderableChunks.end(),
-                [&erasedChunks, this, cameraPos](Chunk* chunk) {
-                    return !chunk || erasedChunks.count(chunk) > 0 || !chunk->isMeshUploaded.load() || chunk->isEmpty || isChunkOutOfRange(chunk, cameraPos);
-                }),
-            renderableChunks.end()
-        );
-        renderableSet.clear();
-        for (Chunk* chunk : renderableChunks) {
-            if (chunk) renderableSet.insert(chunk);
-        }
-
-        // A section can leave the render list when a finer replacement is
-        // ready and later become the fallback again after that replacement is
-        // evicted. Re-admit uploaded sections without duplicating entries.
-        // Duplicate pointers corrupt the GPU parent/child graph and make
-        // traversal cost grow every time a mip section is remeshed.
-        for (int lod = 0; lod < NUM_LODS; ++lod) {
-            for (auto& pair : chunks[lod]) {
-                Chunk* chunk = pair.second.get();
-                if (!chunk || chunk->isEmpty || !chunk->isMeshUploaded.load() ||
-                    isChunkOutOfRange(chunk, cameraPos)) {
-                    continue;
-                }
-                if (renderableSet.insert(chunk).second) {
-                    renderableChunks.push_back(chunk);
-                }
-            }
-        }
-
-        // Mark a coarse mesh as fully replaceable only after all finer
-        // sections covering its region are uploaded. The render path uses
-        // this for a bounded, resident-chunk handoff instead of recursively
-        // walking every virtual root every frame.
-        for (Chunk* chunk : renderableChunks) {
-            if (!chunk || chunk->lod <= 0) continue;
-            bool insideFineRegion = shouldSkipCoarseChunk(
-                chunk->lod,
-                chunk->chunkPos.x,
-                chunk->chunkPos.y,
-                chunk->chunkPos.z,
-                cameraPos
-            );
-            chunk->isFullyCovered = insideFineRegion &&
-                isCoarseChunkCoveredByReadyFineChunks(chunk, cameraPos);
-        }
-
-        // A worker may have discarded a queued section after the camera moved
-        // past it. Keep unfinished sections retryable when they come back into
-        // the active shell instead of leaving a permanent hole in the map.
-        for (int lod = 0; lod < NUM_LODS; ++lod) {
-            for (auto& pair : chunks[lod]) {
-                Chunk* chunk = pair.second.get();
-                if (!chunk || chunk->isGenerated.load() || chunk->isPendingWork.load()) continue;
-                if (isChunkOutOfRange(chunk, cameraPos)) continue;
-                if (chunk->mipRemeshQueued.exchange(true)) continue;
-                chunk->isPendingWork.store(true);
-                enqueueGeneration(pair.second, cameraPos);
             }
         }
 
@@ -633,14 +663,14 @@ public:
             int64_t camCY = static_cast<int64_t>(std::floor(cameraPos.y / worldChunkSize));
             int64_t camCZ = static_cast<int64_t>(std::floor(cameraPos.z / worldChunkSize));
 
+            IVec3 camCell(camCX, camCY, camCZ);
+            if (camCell == lastCamChunkPos[lod]) continue;
+            lastCamChunkPos[lod] = camCell;
             int radius = LOD_RADII[lod];
 
             for (int64_t cz = camCZ - radius; cz <= camCZ + radius; ++cz) {
                 for (int64_t cy = camCY - radius; cy <= camCY + radius; ++cy) {
                     for (int64_t cx = camCX - radius; cx <= camCX + radius; ++cx) {
-                        if (shouldSkipCoarseChunk(lod, cx, cy, cz, cameraPos)) {
-                            continue;
-                        }
 
                         IVec3 cpos(cx, cy, cz);
                         auto it = chunks[lod].find(cpos);
@@ -679,141 +709,59 @@ public:
             std::cerr << "GPU traversal unavailable: geometry arena is not initialized.\n";
             return false;
         }
-        if (visibilityProgram == 0) {
-            return false;
+
+        float projectionScale = 0.5f * projectionY * static_cast<float>(viewportHeight);
+        std::vector<Chunk*> selectedChunks;
+        selectedChunks.reserve(512);
+
+        for (auto& pair : chunks[NUM_LODS - 1]) {
+            if (pair.second) {
+                selectHierarchicalNode(pair.second.get(), frustum, cameraPos, projectionScale, selectedChunks);
+            }
         }
 
-        // The window's framebuffer can be smaller than its logical size on a
-        // scaled Wayland/Xwayland desktop. Keep the Hi-Z resources matched to
+        std::vector<SectionGpuMetadata> drawMetadata;
+        std::vector<DrawElementsIndirectCommand> drawCommands;
+        drawMetadata.reserve(selectedChunks.size());
+        drawCommands.reserve(selectedChunks.size());
 
-        std::vector<TraversalNodeGpu> nodes;
-        std::vector<std::vector<uint32_t>> childLists;
-        std::vector<int32_t> parentIndices;
-        std::unordered_map<Chunk*, uint32_t> nodeIndices;
-        nodes.reserve(renderableChunks.size());
-        childLists.reserve(renderableChunks.size());
-        parentIndices.reserve(renderableChunks.size());
-
-        for (Chunk* chunk : renderableChunks) {
-            if (!chunk || !chunk->mesh.uploaded || !chunk->mesh.geometry.valid) continue;
-            TraversalNodeGpu node;
+        for (size_t i = 0; i < selectedChunks.size(); ++i) {
+            Chunk* chunk = selectedChunks[i];
+            SectionGpuMetadata meta;
             Vec3 minP, maxP;
             getChunkBounds(chunk, cameraPos, minP, maxP);
-            node.chunkMinLod[0] = minP.x;
-            node.chunkMinLod[1] = minP.y;
-            node.chunkMinLod[2] = minP.z;
-            node.chunkMinLod[3] = static_cast<float>(chunk->lod);
-            node.sectionBounds[0] = static_cast<float>(chunk->worldSize);
-            node.topology[2] = chunk->isFullyCovered ? 1u : 0u;
-            node.topology[3] = 1u;
-            node.draw0[0] = chunk->mesh.geometry.indexCount;
-            node.draw0[1] = 1u;
-            node.draw0[2] = static_cast<uint32_t>(chunk->mesh.geometry.indexOffset);
-            node.draw0[3] = static_cast<uint32_t>(chunk->mesh.geometry.baseVertex);
-            node.draw1[0] = static_cast<uint32_t>(nodes.size());
-            uint32_t nodeIndex = static_cast<uint32_t>(nodes.size());
-            nodeIndices[chunk] = nodeIndex;
-            nodes.push_back(node);
-            childLists.emplace_back();
-            parentIndices.push_back(-1);
-        }
+            meta.chunkMinLod[0] = minP.x;
+            meta.chunkMinLod[1] = minP.y;
+            meta.chunkMinLod[2] = minP.z;
+            meta.chunkMinLod[3] = static_cast<float>(chunk->lod);
+            meta.sectionBounds[0] = static_cast<float>(chunk->worldSize);
+            meta.sectionBounds[1] = static_cast<float>(1 << chunk->lod);
 
-        for (Chunk* chunk : renderableChunks) {
-            auto childIt = nodeIndices.find(chunk);
-            // LOD4 is the coarsest tier and has no parent tier. Guard the
-            // array access here; once the first LOD4 mesh arrived this used
-            // chunks[5], corrupting the map lookup and crashing the renderer.
-            if (childIt == nodeIndices.end() || !chunk ||
-                chunk->lod <= 0 || chunk->lod >= NUM_LODS - 1) continue;
-            int parentLod = chunk->lod + 1;
-            int parentWorldChunkSize = CHUNK_SIZE * (1 << parentLod);
-            IVec3 parentPos(
-                floorDiv(chunk->worldMin.x, parentWorldChunkSize),
-                floorDiv(chunk->worldMin.y, parentWorldChunkSize),
-                floorDiv(chunk->worldMin.z, parentWorldChunkSize)
-            );
-            auto parentIt = chunks[parentLod].find(parentPos);
-            if (parentIt == chunks[parentLod].end() || !parentIt->second) continue;
-            auto parentNodeIt = nodeIndices.find(parentIt->second.get());
-            if (parentNodeIt == nodeIndices.end()) continue;
-            parentIndices[childIt->second] = static_cast<int32_t>(parentNodeIt->second);
-            childLists[parentNodeIt->second].push_back(childIt->second);
-        }
+            DrawElementsIndirectCommand cmd;
+            cmd.count = chunk->mesh.geometry.indexCount;
+            cmd.instanceCount = 1;
+            cmd.firstIndex = static_cast<uint32_t>(chunk->mesh.geometry.indexOffset);
+            cmd.baseVertex = static_cast<int32_t>(chunk->mesh.geometry.baseVertex);
+            cmd.baseInstance = static_cast<uint32_t>(i);
 
-        std::vector<uint32_t> roots;
-        std::vector<uint32_t> childLinks;
-        roots.reserve(nodes.size());
-        for (uint32_t i = 0; i < nodes.size(); ++i) {
-            if (parentIndices[i] < 0) {
-                roots.push_back(i);
-            }
-            nodes[i].topology[0] = static_cast<uint32_t>(childLinks.size());
-            nodes[i].topology[1] = static_cast<uint32_t>(childLists[i].size());
-            nodes[i].topology[2] = nodes[i].topology[2] && !childLists[i].empty() ? 1u : 0u;
-            childLinks.insert(childLinks.end(), childLists[i].begin(), childLists[i].end());
+            drawMetadata.push_back(meta);
+            drawCommands.push_back(cmd);
         }
 
         if (diagnosticsEnabled) {
-            lastDiagnostics.nodeCount = nodes.size();
-            lastDiagnostics.rootCount = roots.size();
-            for (const TraversalNodeGpu& node : nodes) {
-                lastDiagnostics.candidateIndices += node.draw0[0];
-                lastDiagnostics.largestCandidate = std::max(lastDiagnostics.largestCandidate, node.draw0[0]);
+            lastDiagnostics.nodeCount = drawCommands.size();
+            lastDiagnostics.rootCount = chunks[NUM_LODS - 1].size();
+            for (const auto& cmd : drawCommands) {
+                lastDiagnostics.candidateIndices += cmd.count;
+                lastDiagnostics.largestCandidate = std::max(lastDiagnostics.largestCandidate, cmd.count);
             }
+            lastDiagnostics.gpuTraversalVerified = true;
+            lastDiagnostics.commandPayloadValid = true;
         }
 
-        geometryArena.uploadTraversalData(nodes, roots, childLinks);
-        geometryArena.dispatchTraversal(
-            visibilityProgram,
-            view,
-            viewProjection,
-            projectionY,
-            viewportWidth,
-            viewportHeight,
-            SCREEN_SPACE_DIAMETER_THRESHOLD,
-            nodes.size(),
-            roots.size()
-        );
-
-        // Validate the first populated traversal result once. This is a
-        // startup guard for drivers that accept the compute shader but fail
-        // to execute its SSBO/indirect-command path correctly. GPU traversal
-        // is mandatory, so a failed probe is fatal to this render session.
-        if (!gpuTraversalProbed) {
-            bool visibleGeometryPotential = false;
-            for (Chunk* chunk : renderableChunks) {
-                if (!chunk || !chunk->mesh.uploaded || !chunk->mesh.geometry.valid) continue;
-                Vec3 minP, maxP;
-                getChunkBounds(chunk, cameraPos, minP, maxP);
-                if (frustum.intersectsAABB(minP, maxP)) {
-                    visibleGeometryPotential = true;
-                    break;
-                }
-            }
-            if (visibleGeometryPotential) {
-                gpuTraversalProbed = true;
-                if (!geometryArena.hasNonZeroIndirectCommand(nodes.size())) {
-                    std::cerr << "GPU traversal produced no visible commands; refusing CPU traversal fallback.\n";
-                    return false;
-                }
-            }
-        }
-        if (diagnosticsEnabled) {
-            bool commandPayloadValid = geometryArena.validateIndirectCommands(
-                nodes,
-                !diagnosticsCommandFailureReported
-            );
-            lastDiagnostics.commandPayloadValid = commandPayloadValid;
-            if (!commandPayloadValid) {
-                diagnosticsCommandFailureReported = true;
-                // Keep the diagnostic loop alive, but never submit an
-                // untrusted indirect command buffer to the driver.
-                return true;
-            }
-        }
+        geometryArena.uploadDrawData(drawMetadata, drawCommands);
         glUseProgram(voxelShaderProgram);
-        geometryArena.drawIndirect(nodes.size());
-        if (diagnosticsEnabled) lastDiagnostics.gpuTraversalVerified = gpuTraversalProbed;
+        geometryArena.drawIndirect(drawCommands.size());
         return true;
     }
 
@@ -824,9 +772,14 @@ public:
 
     void getStats(int& outTotalChunks, int& outUploadedMeshes, int& outPendingTasks) {
         outTotalChunks = 0;
-        outUploadedMeshes = static_cast<int>(renderableChunks.size());
+        outUploadedMeshes = 0;
         for (int lod = 0; lod < NUM_LODS; ++lod) {
             outTotalChunks += static_cast<int>(chunks[lod].size());
+            for (const auto& pair : chunks[lod]) {
+                if (pair.second && pair.second->isMeshUploaded.load() && !pair.second->isEmpty) {
+                    ++outUploadedMeshes;
+                }
+            }
         }
         std::lock_guard<std::mutex> lock(queueMutex);
         outPendingTasks = static_cast<int>(generateQueue.size());

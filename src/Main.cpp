@@ -407,11 +407,21 @@ int main(int argc, char** argv) {
 
         bool shouldDescend(TraversalNode node) {
             if (node.topology.y == 0u || node.topology.z == 0u) return false;
-            vec3 center = node.chunkMinLod.xyz + vec3(node.sectionBounds.x * 0.5);
-            float distance = max(1.0, -((uView * vec4(center, 1.0)).z));
-            float radius = node.sectionBounds.x * 0.8660254;
-            float diameter = radius * uProjectionY * uViewportSize.y / distance;
-            return diameter > uScreenDiameterThreshold;
+            vec3 minP = node.chunkMinLod.xyz;
+            float size = node.sectionBounds.x;
+            float geometricError = node.sectionBounds.y;
+            bool wasSplit = node.sectionBounds.z > 0.5;
+
+            vec3 maxP = minP + vec3(size);
+            vec3 d = max(vec3(0.0), max(minP, -maxP));
+            float dist = max(0.1, length(d));
+
+            float projectionScale = 0.5 * uProjectionY * uViewportSize.y;
+            float pixelError = geometricError * projectionScale / dist;
+
+            float splitThreshold = uScreenDiameterThreshold;
+            float mergeThreshold = splitThreshold * 0.625;
+            return wasSplit ? (pixelError > mergeThreshold) : (pixelError > splitThreshold);
         }
 
         void emitNode(uint nodeIndex) {

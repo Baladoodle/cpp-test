@@ -2,7 +2,7 @@
 #define MESH_BUILDER_HPP
 
 #include "Chunk.hpp"
-#include "WorldGen.hpp"
+#include "VoxelMip.hpp"
 #include "Block.hpp"
 #include "MathUtils.hpp"
 #include <vector>
@@ -129,7 +129,7 @@ private:
 public:
     // Rebuild the derived border/light state after a section's voxel values
     // have come from the mip pyramid instead of procedural sampling.
-    static void finalizeVoxelData(Chunk& chunk, const std::vector<float>* densityGrid = nullptr) {
+    static void finalizeVoxelData(Chunk& chunk, const std::vector<float>* densityGrid = nullptr, const VoxelMipStore* mipStore = nullptr) {
         bool hasSolid = false;
         for (int z = 0; z < CHUNK_SIZE && !hasSolid; ++z) {
             for (int y = 0; y < CHUNK_SIZE && !hasSolid; ++y) {
@@ -200,6 +200,16 @@ public:
                             block = WorldGen::getBlockAtWithDensitiesAndSharpness(
                                 wx, wy, wz, scale, density, aboveDensity, above2Density, sharpness
                             );
+                        }
+                    } else if (mipStore) {
+                        uint8_t mipBlock = mipStore->readVoxel(chunk.lod, chunk.chunkPos, x, y, z);
+                        if (mipBlock != BLOCK_AIR) {
+                            block = mipBlock;
+                        } else {
+                            int64_t wx = wmx + x * scale + scale / 2;
+                            int64_t wy = wmy + y * scale + scale / 2;
+                            int64_t wz = wmz + z * scale + scale / 2;
+                            block = WorldGen::getBlockAt(wx, wy, wz, scale);
                         }
                     } else {
                         int64_t wx = wmx + x * scale + scale / 2;
