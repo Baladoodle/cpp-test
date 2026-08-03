@@ -384,50 +384,45 @@ private:
                std::abs(chunk->chunkPos.z - camCZ) > radius;
     }
 
+    float calculateTaskPriority(const Chunk& chunk, const Vec3& cameraPos) const {
+        float centerX = static_cast<float>(chunk.worldMin.x) + chunk.worldSize * 0.5f;
+        float centerY = static_cast<float>(chunk.worldMin.y) + chunk.worldSize * 0.5f;
+        float centerZ = static_cast<float>(chunk.worldMin.z) + chunk.worldSize * 0.5f;
+        float dx = centerX - cameraPos.x;
+        float dy = centerY - cameraPos.y;
+        float dz = centerZ - cameraPos.z;
+        float distSq = dx * dx + dy * dy + dz * dz;
+        float worldSize = static_cast<float>(chunk.worldSize);
+        return (distSq / (worldSize * worldSize));
+    }
+
     void trimGenerationQueue(const Vec3& cameraPos) {
         std::vector<GenerationTask> kept;
         {
             std::lock_guard<std::mutex> lock(queueMutex);
-            if (generateQueue.size() <= MAX_PENDING_GENERATION_TASKS) return;
+            if (generateQueue.empty()) return;
 
             kept.reserve(generateQueue.size());
             while (!generateQueue.empty()) {
                 GenerationTask task = generateQueue.top();
                 generateQueue.pop();
                 if (task.chunk && !isChunkOutsideGenerationWindow(task.chunk.get(), cameraPos)) {
+                    task.priority = calculateTaskPriority(*task.chunk, cameraPos);
                     kept.push_back(std::move(task));
                 } else if (task.chunk) {
                     cancelTaskIfCurrent(task);
                 }
             }
-        }
 
-        std::sort(kept.begin(), kept.end(), [](const GenerationTask& a, const GenerationTask& b) {
-            if (a.priority == b.priority) return a.sequence < b.sequence;
-            return a.priority < b.priority;
-        });
-        if (kept.size() > MAX_PENDING_GENERATION_TASKS) {
-            for (size_t i = MAX_PENDING_GENERATION_TASKS; i < kept.size(); ++i) {
-                cancelTaskIfCurrent(kept[i]);
+            for (GenerationTask& task : kept) {
+                generateQueue.push(std::move(task));
             }
-            kept.resize(MAX_PENDING_GENERATION_TASKS);
         }
-
-        std::lock_guard<std::mutex> lock(queueMutex);
-        for (GenerationTask& task : kept) generateQueue.push(std::move(task));
     }
 
     void enqueueGeneration(const std::shared_ptr<Chunk>& chunk, const Vec3& cameraPos) {
         if (!chunk) return;
-        float centerX = static_cast<float>(chunk->worldMin.x) + chunk->worldSize * 0.5f;
-        float centerY = static_cast<float>(chunk->worldMin.y) + chunk->worldSize * 0.5f;
-        float centerZ = static_cast<float>(chunk->worldMin.z) + chunk->worldSize * 0.5f;
-        float dx = centerX - cameraPos.x;
-        float dy = centerY - cameraPos.y;
-        float dz = centerZ - cameraPos.z;
-        float distSq = dx * dx + dy * dy + dz * dz;
-        float worldSize = static_cast<float>(chunk->worldSize);
-        float normDistSq = distSq / (worldSize * worldSize);
+        float normDistSq = calculateTaskPriority(*chunk, cameraPos);
         GenerationTask task{
             chunk,
             normDistSq,
@@ -437,10 +432,25 @@ private:
         {
             std::lock_guard<std::mutex> lock(queueMutex);
             if (generateQueue.size() >= MAX_PENDING_GENERATION_TASKS) {
+                std::vector<GenerationTask> kept;
+                kept.reserve(generateQueue.size());
+                while (!generateQueue.empty()) {
+                    GenerationTask t = generateQueue.top();
+                    generateQueue.pop();
+                    if (t.chunk && !isChunkOutsideGenerationWindow(t.chunk.get(), cameraPos)) {
+                        kept.push_back(std::move(t));
+                    } else if (t.chunk) {
+                        cancelTaskIfCurrent(t);
+                    }
+                }
+                for (GenerationTask& t : kept) generateQueue.push(std::move(t));
+            }
+            if (generateQueue.size() < MAX_PENDING_GENERATION_TASKS) {
+                generateQueue.push(task);
+            } else {
                 cancelTaskIfCurrent(task);
                 return;
             }
-            generateQueue.push(task);
         }
         cv.notify_one();
     }

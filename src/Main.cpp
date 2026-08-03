@@ -469,8 +469,7 @@ int main(int argc, char** argv) {
                     for (uint child = 0u; child < childCount; ++child) {
                         nextQueue[appendBase + child] = childLinks[firstChild + child];
                     }
-                    // A malformed/overfull queue must retain the coarser
-                    // parent rather than producing a visible hole.
+                } else {
                     emitNode(nodeIndex);
                 }
             } else {
