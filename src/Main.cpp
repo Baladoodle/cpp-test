@@ -26,6 +26,7 @@ bool firstMouse = true;
 float lastX = 640.0f, lastY = 360.0f;
 bool cursorLocked = true;
 bool showHUD = true;
+int diagMode = 0;
 
 static GLenum drainOpenGLErrors() {
     GLenum firstError = GL_NO_ERROR;
@@ -50,7 +51,10 @@ void keyCallback(GLFWwindow* window, int key, int scancode, int action, int mods
             if (key == GLFW_KEY_H) {
                 showHUD = !showHUD;
             }
-
+            if (key >= GLFW_KEY_0 && key <= GLFW_KEY_6) {
+                diagMode = key - GLFW_KEY_0;
+                std::cout << "Diagnostic Shader Mode set to: " << diagMode << "\n";
+            }
             if (key == GLFW_KEY_ESCAPE) {
                 cursorLocked = !cursorLocked;
                 glfwSetInputMode(window, GLFW_CURSOR, cursorLocked ? GLFW_CURSOR_DISABLED : GLFW_CURSOR_NORMAL);
@@ -172,14 +176,11 @@ int main(int argc, char** argv) {
 
         out vec3 vNormal;
         out vec2 vTexCoord;
-        out float vTexIndex;
-        flat out int vCutoutTile;
-        out vec2 vCutoutLocalUV;
+        flat out int vTexIndex;
         out float vAO;
         out vec3 vBlockRGB;
         out float vSkyLight;
         out float vDistance;
-        
         out vec3 vWorldPosRelative;
 
         uniform mat4 uProjection;
@@ -212,13 +213,7 @@ int main(int argc, char** argv) {
 
             vNormal = aNormal;
             vTexCoord = aTexCoord;
-            vTexIndex = aTexIndex;
-            vCutoutTile = int(aTexIndex + 0.5);
-            vec2 atlasTile = vec2(
-                mod(aTexIndex, 16.0),
-                floor(aTexIndex / 16.0)
-            );
-            vCutoutLocalUV = aTexCoord * 16.0 - atlasTile;
+            vTexIndex = int(aTexIndex + 0.5);
             vAO = aAO;
             vBlockRGB = aBlockRGB;
             vSkyLight = aSkyLight;
@@ -232,9 +227,7 @@ int main(int argc, char** argv) {
         #version 430 core
         in vec3 vNormal;
         in vec2 vTexCoord;
-        in float vTexIndex;
-        flat in int vCutoutTile;
-        in vec2 vCutoutLocalUV;
+        flat in int vTexIndex;
         in float vAO;
         in vec3 vBlockRGB;
         in float vSkyLight;
@@ -244,7 +237,7 @@ int main(int argc, char** argv) {
 
         out vec4 FragColor;
 
-        uniform sampler2D uTextureAtlas;
+        uniform sampler2DArray uTextureAtlas;
         uniform vec3 uSunDir;
         uniform vec3 uSunColor;
         uniform vec3 uSkyAmbientColor;
@@ -252,34 +245,11 @@ int main(int argc, char** argv) {
         uniform vec3 uSkyTint;
         uniform vec3 uFogColor;
         uniform float uTime;
+        uniform int uDiagMode;
 
         void main() {
-            vec4 texColor;
-            bool isLeafTile = vCutoutTile == 7 || vCutoutTile == 13 ||
-                vCutoutTile == 16 || vCutoutTile == 19 ||
-                vCutoutTile == 22 || vCutoutTile == 23 ||
-                vCutoutTile == 26 || vCutoutTile == 27 ||
-                (vCutoutTile >= 38 && vCutoutTile <= 57);
-            bool isGrassTile = vCutoutTile >= 29 && vCutoutTile <= 37;
-            if (isLeafTile || isGrassTile) {
-                int tileID = vCutoutTile;
-                ivec2 tileBase = ivec2((tileID % 16) * 16, (tileID / 16) * 16);
-                ivec2 localPixel = ivec2(
-                    clamp(int(vCutoutLocalUV.x * 16.0), 0, 15),
-                    clamp(int(vCutoutLocalUV.y * 16.0), 0, 15)
-                );
-                texColor = texelFetch(uTextureAtlas, tileBase + localPixel, 0);
-            } else {
-                vec2 atlasTile = vec2(
-                    mod(vTexIndex, 16.0),
-                    floor(vTexIndex / 16.0)
-                );
-                vec2 repeatedUV = fract(vTexCoord * 16.0);
-                vec2 atlasUV = (atlasTile + min(repeatedUV, vec2(0.999))) / 16.0;
-                texColor = texture(uTextureAtlas, atlasUV);
-            }
+            vec4 texColor = texture(uTextureAtlas, vec3(vTexCoord, float(vTexIndex)));
             if (texColor.a < 0.1) discard;
-
             // 1. Hemispheric Ambient Shading (Top vs Underside Glow)
             float hemiFactor = clamp(vNormal.y * 0.5 + 0.5, 0.0, 1.0);
             vec3 hemiAmbient = mix(uAbyssAmbientColor, uSkyAmbientColor, hemiFactor);
@@ -295,7 +265,12 @@ int main(int argc, char** argv) {
             vec3 viewDir = normalize(-vWorldPosRelative);
             vec3 sunDirNorm = normalize(uSunDir);
             vec3 extraFoliageLight = vec3(0.0);
-            if (isLeafTile || isGrassTile) {
+            bool isFoliage = vTexIndex == 7 || vTexIndex == 13 ||
+                vTexIndex == 16 || vTexIndex == 19 ||
+                vTexIndex == 22 || vTexIndex == 23 ||
+                vTexIndex == 26 || vTexIndex == 27 ||
+                (vTexIndex >= 29 && vTexIndex <= 57);
+            if (isFoliage) {
                 float backLighting = max(0.0, dot(-viewDir, sunDirNorm));
                 float sss = pow(backLighting, 3.0) * 0.65;
                 float rim = pow(1.0 - max(0.0, dot(viewDir, vNormal)), 3.5) * 0.25;
@@ -305,17 +280,29 @@ int main(int argc, char** argv) {
             // Total Combined Surface Illumination
             vec3 totalLight = hemiAmbient + directSun * 0.8 + emissiveRGB + extraFoliageLight;
 
-            // Soft Ease-Out Contact Ambient Occlusion
-            float aoShadow = 1.0 - vAO;
-            float smoothAO = 1.0 - pow(aoShadow, 1.35) * 0.72;
+            // Linear Contact Ambient Occlusion (prevents Mach band / pow artifacting on greedy quads)
+            float smoothAO = mix(0.35, 1.0, vAO);
             vec3 baseColor = texColor.rgb * totalLight * smoothAO;
 
             // Atmospheric Fog blending distant islands into sky color
             float fogStart = 2000.0;
             float fogEnd = 4608.0;
             float fogFactor = smoothstep(fogStart, fogEnd, vDistance);
-
-            FragColor = vec4(mix(baseColor, uFogColor, fogFactor), texColor.a);
+            if (uDiagMode == 1) {
+                FragColor = vec4(texColor.rgb, 1.0);
+            } else if (uDiagMode == 2) {
+                FragColor = vec4(vec3(smoothAO), 1.0);
+            } else if (uDiagMode == 3) {
+                FragColor = vec4(totalLight, 1.0);
+            } else if (uDiagMode == 4) {
+                FragColor = vec4(vNormal * 0.5 + 0.5, 1.0);
+            } else if (uDiagMode == 5) {
+                FragColor = vec4(vec3(vAO), 1.0);
+            } else if (uDiagMode == 6) {
+                FragColor = vec4(vec3(0.6) * totalLight, 1.0);
+            } else {
+                FragColor = vec4(mix(baseColor, uFogColor, fogFactor), texColor.a);
+            }
         }
     )";
 
@@ -467,8 +454,8 @@ int main(int argc, char** argv) {
         voxelShader.setVec3("uFogColor", fogColor);
         voxelShader.setVec3("uCameraWorldPos", camera.position);
         voxelShader.setFloat("uTime", currentFrame);
-
-        glBindTexture(GL_TEXTURE_2D, atlasTexture);
+        voxelShader.setInt("uDiagMode", diagMode);
+        glBindTexture(GL_TEXTURE_2D_ARRAY, atlasTexture);
         voxelShader.setInt("uTextureAtlas", 0);
 
         auto traversalStart = std::chrono::high_resolution_clock::now();
@@ -503,8 +490,7 @@ int main(int argc, char** argv) {
             ss4 << "Effective Render Distance: ~4,608 blocks (LODs 0..4)";
             ss5 << "Chunks: " << totalChunks << " loaded | Meshes: " << uploadedMeshes << " | Queued Tasks: " << pendingTasks;
             ss6 << "Mode: " << (physics.isFlying ? "FLYING (WASD + Space/Shift)" : "WALKING (Physics Collision)")
-                << (superSpeed ? " [SUPER SPEED 160m/s]" : "") << " | [F] Toggle Fly | [H] HUD";
-            hud.renderText(ss1.str(), 16.0f, 16.0f, 1.8f, Vec3(1.0f, 0.9f, 0.2f), static_cast<float>(windowWidth), static_cast<float>(windowHeight));
+                << (superSpeed ? " [SUPER SPEED 160m/s]" : "") << " | [F] Toggle Fly | [H] HUD | [0-6] Diag Modes (" << diagMode << ")";
             hud.renderText(ss2.str(), 16.0f, 44.0f, 1.5f, Vec3(0.3f, 1.0f, 0.4f), static_cast<float>(windowWidth), static_cast<float>(windowHeight));
             hud.renderText(ss3.str(), 16.0f, 68.0f, 1.5f, Vec3(0.9f, 0.9f, 0.9f), static_cast<float>(windowWidth), static_cast<float>(windowHeight));
             hud.renderText(ss4.str(), 16.0f, 92.0f, 1.5f, Vec3(0.4f, 0.8f, 1.0f), static_cast<float>(windowWidth), static_cast<float>(windowHeight));

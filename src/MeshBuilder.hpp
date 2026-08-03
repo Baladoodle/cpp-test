@@ -86,8 +86,6 @@ private:
                     if (!info.isTransparent) {
                         openSky = false;
                         skyVal = 0;
-                    } else if (openSky && isAnyLeaf(block)) {
-                        skyVal = (skyVal > 3) ? skyVal - 2 : 0;
                     }
 
                     uint8_t r = info.lightR;
@@ -566,6 +564,29 @@ public:
             const BlockInfo& info = getBlockInfo(getNeighborhoodBlock(x, y, z));
             return info.isSolid && !info.isTransparent;
         };
+        auto getVertexAO = [&](int face, const Vec3& cornerPos, int nx, int ny, int nz) -> float {
+            int dx = (cornerPos.x > 0.5f) ? 1 : -1;
+            int dy = (cornerPos.y > 0.5f) ? 1 : -1;
+            int dz = (cornerPos.z > 0.5f) ? 1 : -1;
+
+            bool s1 = false, s2 = false, corner = false;
+            if (face == DIR_POS_X || face == DIR_NEG_X) {
+                s1 = isSolidBlock(nx, ny + dy, nz);
+                s2 = isSolidBlock(nx, ny, nz + dz);
+                corner = isSolidBlock(nx, ny + dy, nz + dz);
+            } else if (face == DIR_POS_Y || face == DIR_NEG_Y) {
+                s1 = isSolidBlock(nx + dx, ny, nz);
+                s2 = isSolidBlock(nx, ny, nz + dz);
+                corner = isSolidBlock(nx + dx, ny, nz + dz);
+            } else {
+                s1 = isSolidBlock(nx + dx, ny, nz);
+                s2 = isSolidBlock(nx, ny + dy, nz);
+                corner = isSolidBlock(nx + dx, ny + dy, nz);
+            }
+
+            return calculateAO(s1, s2, corner);
+        };
+
 
         // only opaque cubic terrain is safe to combine into a rectangle.
         auto isGreedyOpaqueBlock = [&](uint8_t block) -> bool {
@@ -617,11 +638,6 @@ public:
                                    float blockRelX, float blockRelY, float blockRelZ,
                                    const Vec3& bottomA, const Vec3& bottomB, const Vec3& normal) {
             const uint8_t texTileID = grassTexTile;
-            const float tileU0 = (texTileID % 16) / 16.0f;
-            const float tileV0 = (texTileID / 16) / 16.0f;
-            const float tileSize = 1.0f / 16.0f;
-            const float halfTexel = 0.5f / 256.0f;
-            const float safeTileSize = tileSize - halfTexel * 2.0f;
             const Vec3 up(0.0f, fScale * heightScale, 0.0f);
             const Vec3 positions[4] = {
                 bottomA, bottomA + up, bottomB + up, bottomB
@@ -651,8 +667,8 @@ public:
                     vert.nz = quadNormal.z;
                     // Keep grass samples inside the tile by half a texel so
                     // atlas boundaries can never contribute neighbor colors.
-                    vert.u = tileU0 + halfTexel + quadUV[c][0] * safeTileSize;
-                    vert.v = tileV0 + halfTexel + quadUV[c][1] * safeTileSize;
+                    vert.u = quadUV[c][0];
+                    vert.v = quadUV[c][1];
                     vert.texIndex = static_cast<float>(texTileID);
                     vert.ao = 1.0f;
                     uint16_t plantL = chunk.getLight(
@@ -732,10 +748,8 @@ public:
             auto appendGreedyQuad = [&](uint8_t blockType, int face, int slice,
                                         int u0, int v0, int width, int height) {
                 uint8_t texTileID = getBlockTextureIndex(blockType, face);
-                float tileU0 = (texTileID % 16) / 16.0f;
-                float tileV0 = (texTileID / 16) / 16.0f;
-                float tileSize = 1.0f / 16.0f;
                 uint32_t baseIdx = static_cast<uint32_t>(chunk.stagedVertices.size());
+                float aoVals[4];
 
                 for (int c = 0; c < 4; ++c) {
                     int uBoundary = u0 + (cornerU[face][c] ? width : 0);
@@ -753,12 +767,8 @@ public:
                     int nx = static_cast<int>(cell.x) + faceOffsetDirs[face][0];
                     int ny = static_cast<int>(cell.y) + faceOffsetDirs[face][1];
                     int nz = static_cast<int>(cell.z) + faceOffsetDirs[face][2];
-                    int c1x = static_cast<int>(cell.x) + static_cast<int>(cornerPos.x) + faceOffsetDirs[face][0];
-                    int c1y = static_cast<int>(cell.y) + static_cast<int>(cornerPos.y) + faceOffsetDirs[face][1];
-                    int c1z = static_cast<int>(cell.z) + static_cast<int>(cornerPos.z) + faceOffsetDirs[face][2];
-                    bool s1 = isSolidBlock(c1x, ny, nz);
-                    bool s2 = isSolidBlock(nx, c1y, nz);
-                    bool corner = isSolidBlock(c1x, c1y, nz);
+                    float ao = getVertexAO(face, cornerPos, nx, ny, nz);
+                    aoVals[c] = ao;
 
                     uint16_t light = getNeighborhoodLight(nx, ny, nz);
                     const BlockInfo& info = getBlockInfo(blockType);
@@ -776,10 +786,10 @@ public:
                     vert.nx = faceNormals[face].x;
                     vert.ny = faceNormals[face].y;
                     vert.nz = faceNormals[face].z;
-                    vert.u = tileU0 + cornerU[face][c] * width * tileSize;
-                    vert.v = tileV0 + cornerV[face][c] * height * tileSize;
+                    vert.u = static_cast<float>(cornerU[face][c] * width);
+                    vert.v = static_cast<float>(cornerV[face][c] * height);
                     vert.texIndex = static_cast<float>(texTileID);
-                    vert.ao = calculateAO(s1, s2, corner);
+                    vert.ao = ao;
                     vert.lightR = lightR;
                     vert.lightG = lightG;
                     vert.lightB = lightB;
@@ -788,12 +798,21 @@ public:
                     chunk.stagedVertices.push_back(vert);
                 }
 
-                chunk.stagedIndices.push_back(baseIdx + 0);
-                chunk.stagedIndices.push_back(baseIdx + 1);
-                chunk.stagedIndices.push_back(baseIdx + 2);
-                chunk.stagedIndices.push_back(baseIdx + 0);
-                chunk.stagedIndices.push_back(baseIdx + 2);
-                chunk.stagedIndices.push_back(baseIdx + 3);
+                if (aoVals[0] + aoVals[2] < aoVals[1] + aoVals[3]) {
+                    chunk.stagedIndices.push_back(baseIdx + 0);
+                    chunk.stagedIndices.push_back(baseIdx + 1);
+                    chunk.stagedIndices.push_back(baseIdx + 3);
+                    chunk.stagedIndices.push_back(baseIdx + 1);
+                    chunk.stagedIndices.push_back(baseIdx + 2);
+                    chunk.stagedIndices.push_back(baseIdx + 3);
+                } else {
+                    chunk.stagedIndices.push_back(baseIdx + 0);
+                    chunk.stagedIndices.push_back(baseIdx + 1);
+                    chunk.stagedIndices.push_back(baseIdx + 2);
+                    chunk.stagedIndices.push_back(baseIdx + 0);
+                    chunk.stagedIndices.push_back(baseIdx + 2);
+                    chunk.stagedIndices.push_back(baseIdx + 3);
+                }
             };
 
             struct GreedyCell {
@@ -810,21 +829,12 @@ public:
 
             auto calculateAoSignature = [&](const IVec3& cell, int face) -> uint8_t {
                 uint8_t signature = 0;
+                int nx = static_cast<int>(cell.x) + faceOffsetDirs[face][0];
+                int ny = static_cast<int>(cell.y) + faceOffsetDirs[face][1];
+                int nz = static_cast<int>(cell.z) + faceOffsetDirs[face][2];
                 for (int c = 0; c < 4; ++c) {
                     Vec3 cornerPos = faceCorners[face][c];
-                    int nx = static_cast<int>(cell.x) + faceOffsetDirs[face][0];
-                    int ny = static_cast<int>(cell.y) + faceOffsetDirs[face][1];
-                    int nz = static_cast<int>(cell.z) + faceOffsetDirs[face][2];
-                    int c1x = static_cast<int>(cell.x) +
-                        static_cast<int>(cornerPos.x) + faceOffsetDirs[face][0];
-                    int c1y = static_cast<int>(cell.y) +
-                        static_cast<int>(cornerPos.y) + faceOffsetDirs[face][1];
-                    int c1z = static_cast<int>(cell.z) +
-                        static_cast<int>(cornerPos.z) + faceOffsetDirs[face][2];
-                    bool side1 = isSolidBlock(c1x, ny, nz);
-                    bool side2 = isSolidBlock(nx, c1y, nz);
-                    bool corner = isSolidBlock(c1x, c1y, nz);
-                    float ao = calculateAO(side1, side2, corner);
+                    float ao = getVertexAO(face, cornerPos, nx, ny, nz);
                     uint8_t value = ao <= 0.3f
                         ? 3
                         : (ao < 0.7f ? 2 : (ao < 0.9f ? 1 : 0));
@@ -989,9 +999,6 @@ public:
                         if (isAnyLeaf(blockType)) {
                             texTileID = getLeafTextureIndex(blockType, leafVariant);
                         }
-                        float tileU0 = (texTileID % 16) / 16.0f;
-                        float tileV0 = (texTileID / 16) / 16.0f;
-                        float tileSize = 1.0f / 16.0f;
                         bool flipGrassSideV = blockType == BLOCK_GRASS &&
                             f != DIR_POS_Y && f != DIR_NEG_Y;
 
@@ -1013,15 +1020,7 @@ public:
                         float ao[4];
                         for (int c = 0; c < 4; ++c) {
                             Vec3 cornerPos = faceCorners[f][c];
-                            int c1x = x + (int)cornerPos.x + faceOffsetDirs[f][0];
-                            int c1y = y + (int)cornerPos.y + faceOffsetDirs[f][1];
-                            int c1z = z + (int)cornerPos.z + faceOffsetDirs[f][2];
-
-                            bool s1 = isSolidBlock(c1x, ny, nz);
-                            bool s2 = isSolidBlock(nx, c1y, nz);
-                            bool corner = isSolidBlock(c1x, c1y, nz);
-
-                            ao[c] = calculateAO(s1, s2, corner);
+                            ao[c] = getVertexAO(f, cornerPos, nx, ny, nz);
                         }
 
                         uint32_t baseIdx = static_cast<uint32_t>(chunk.stagedVertices.size());
@@ -1035,9 +1034,8 @@ public:
                             vert.nx = faceNormals[f].x;
                             vert.ny = faceNormals[f].y;
                             vert.nz = faceNormals[f].z;
-                            vert.u = tileU0 + faceUVs[c][0] * tileSize;
-                            float faceV = flipGrassSideV ? 1.0f - faceUVs[c][1] : faceUVs[c][1];
-                            vert.v = tileV0 + faceV * tileSize;
+                            vert.u = faceUVs[c][0];
+                            vert.v = flipGrassSideV ? 1.0f - faceUVs[c][1] : faceUVs[c][1];
                             vert.texIndex = static_cast<float>(texTileID);
                             vert.ao = ao[c];
                             vert.lightR = fR;
@@ -1050,12 +1048,21 @@ public:
                         }
 
                         // Add quad indices (2 triangles)
-                        chunk.stagedIndices.push_back(baseIdx + 0);
-                        chunk.stagedIndices.push_back(baseIdx + 1);
-                        chunk.stagedIndices.push_back(baseIdx + 2);
-                        chunk.stagedIndices.push_back(baseIdx + 0);
-                        chunk.stagedIndices.push_back(baseIdx + 2);
-                        chunk.stagedIndices.push_back(baseIdx + 3);
+                        if (ao[0] + ao[2] < ao[1] + ao[3]) {
+                            chunk.stagedIndices.push_back(baseIdx + 0);
+                            chunk.stagedIndices.push_back(baseIdx + 1);
+                            chunk.stagedIndices.push_back(baseIdx + 3);
+                            chunk.stagedIndices.push_back(baseIdx + 1);
+                            chunk.stagedIndices.push_back(baseIdx + 2);
+                            chunk.stagedIndices.push_back(baseIdx + 3);
+                        } else {
+                            chunk.stagedIndices.push_back(baseIdx + 0);
+                            chunk.stagedIndices.push_back(baseIdx + 1);
+                            chunk.stagedIndices.push_back(baseIdx + 2);
+                            chunk.stagedIndices.push_back(baseIdx + 0);
+                            chunk.stagedIndices.push_back(baseIdx + 2);
+                            chunk.stagedIndices.push_back(baseIdx + 3);
+                        }
                     }
                 }
             }

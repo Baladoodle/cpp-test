@@ -11,16 +11,16 @@
 class TextureAtlas {
 public:
     static constexpr int TILE_SIZE = 16;
-    static constexpr int TILES_PER_ROW = 16;
-    static constexpr int ATLAS_SIZE = TILE_SIZE * TILES_PER_ROW; // 256x256 pixels
+    static constexpr int MAX_TILES = 256;
 
     static GLuint createProceduralAtlas() {
-        std::vector<uint8_t> pixels(ATLAS_SIZE * ATLAS_SIZE * 4, 255);
+        std::vector<uint8_t> pixels(MAX_TILES * TILE_SIZE * TILE_SIZE * 4, 255);
 
-        // Helper to set pixel color at atlas coordinate (x, y)
+        int currentTileID = 0;
+        // Helper to set pixel color at tile coordinate (x, y)
         auto setPixel = [&](int x, int y, uint8_t r, uint8_t g, uint8_t b, uint8_t a = 255) {
-            if (x < 0 || x >= ATLAS_SIZE || y < 0 || y >= ATLAS_SIZE) return;
-            int idx = (y * ATLAS_SIZE + x) * 4;
+            if (currentTileID < 0 || currentTileID >= MAX_TILES || x < 0 || x >= TILE_SIZE || y < 0 || y >= TILE_SIZE) return;
+            int idx = (currentTileID * TILE_SIZE * TILE_SIZE + y * TILE_SIZE + x) * 4;
             pixels[idx + 0] = r;
             pixels[idx + 1] = g;
             pixels[idx + 2] = b;
@@ -91,13 +91,10 @@ public:
 
         // Generate each 16x16 tile
         for (int tileID = 0; tileID < 59; ++tileID) {
-            int startX = (tileID % TILES_PER_ROW) * TILE_SIZE;
-            int startY = (tileID / TILES_PER_ROW) * TILE_SIZE;
+            currentTileID = tileID;
 
             for (int py = 0; py < TILE_SIZE; ++py) {
                 for (int px = 0; px < TILE_SIZE; ++px) {
-                    int ax = startX + px;
-                    int ay = startY + py;
                     float n = randNoise(px, py, tileID * 17) * 0.15f;
 
                     switch (tileID) {
@@ -105,7 +102,7 @@ public:
                             uint8_t r = (uint8_t)std::clamp(55.0f + n * 40.0f, 0.0f, 255.0f);
                             uint8_t g = (uint8_t)std::clamp(170.0f + n * 60.0f, 0.0f, 255.0f);
                             uint8_t b = (uint8_t)std::clamp(45.0f + n * 30.0f, 0.0f, 255.0f);
-                            setPixel(ax, ay, r, g, b);
+                            setPixel(px, py, r, g, b);
                             break;
                         }
                         case 1: { // Grass Side
@@ -113,12 +110,12 @@ public:
                                 uint8_t r = (uint8_t)std::clamp(55.0f + n * 40.0f, 0.0f, 255.0f);
                                 uint8_t g = (uint8_t)std::clamp(170.0f + n * 60.0f, 0.0f, 255.0f);
                                 uint8_t b = (uint8_t)std::clamp(45.0f + n * 30.0f, 0.0f, 255.0f);
-                                setPixel(ax, ay, r, g, b);
+                                setPixel(px, py, r, g, b);
                             } else { // Dirt body
                                 uint8_t r = (uint8_t)std::clamp(115.0f + n * 40.0f, 0.0f, 255.0f);
                                 uint8_t g = (uint8_t)std::clamp(75.0f + n * 30.0f, 0.0f, 255.0f);
                                 uint8_t b = (uint8_t)std::clamp(45.0f + n * 20.0f, 0.0f, 255.0f);
-                                setPixel(ax, ay, r, g, b);
+                                setPixel(px, py, r, g, b);
                             }
                             break;
                         }
@@ -126,12 +123,12 @@ public:
                             uint8_t r = (uint8_t)std::clamp(115.0f + n * 40.0f, 0.0f, 255.0f);
                             uint8_t g = (uint8_t)std::clamp(75.0f + n * 30.0f, 0.0f, 255.0f);
                             uint8_t b = (uint8_t)std::clamp(45.0f + n * 20.0f, 0.0f, 255.0f);
-                            setPixel(ax, ay, r, g, b);
+                            setPixel(px, py, r, g, b);
                             break;
                         }
                         case 3: { // Stone
                             uint8_t val = (uint8_t)std::clamp(120.0f + n * 50.0f, 0.0f, 255.0f);
-                            setPixel(ax, ay, val, val, val);
+                            setPixel(px, py, val, val, val);
                             break;
                         }
                         case 58: { // Deep Stone
@@ -143,7 +140,7 @@ public:
                             uint8_t r = (uint8_t)std::clamp(55.0f + vertical * 10.0f + n * 30.0f + vein * 16.0f, 0.0f, 255.0f);
                             uint8_t g = (uint8_t)std::clamp(64.0f + vertical * 12.0f + n * 32.0f + vein * 18.0f, 0.0f, 255.0f);
                             uint8_t b = (uint8_t)std::clamp(70.0f + vertical * 14.0f + n * 36.0f + vein * 22.0f, 0.0f, 255.0f);
-                            setPixel(ax, ay, r, g, b);
+                            setPixel(px, py, r, g, b);
                             break;
                         }
                         case 4: { // Glow Crystal
@@ -151,7 +148,7 @@ public:
                             uint8_t r = (uint8_t)std::clamp(255.0f - dist * 100.0f + n * 30.0f, 0.0f, 255.0f);
                             uint8_t g = (uint8_t)std::clamp(230.0f - dist * 120.0f + n * 30.0f, 0.0f, 255.0f);
                             uint8_t b = (uint8_t)std::clamp(100.0f + dist * 120.0f + n * 30.0f, 0.0f, 255.0f);
-                            setPixel(ax, ay, r, g, b);
+                            setPixel(px, py, r, g, b);
                             break;
                         }
                         case 5: { // Oak Log Side
@@ -159,7 +156,7 @@ public:
                             uint8_t r = (uint8_t)std::clamp(100.0f + barkNoise * 40.0f, 0.0f, 255.0f);
                             uint8_t g = (uint8_t)std::clamp(65.0f + barkNoise * 30.0f, 0.0f, 255.0f);
                             uint8_t b = (uint8_t)std::clamp(35.0f + barkNoise * 20.0f, 0.0f, 255.0f);
-                            setPixel(ax, ay, r, g, b);
+                            setPixel(px, py, r, g, b);
                             break;
                         }
                         case 6: { // Oak Log Top
@@ -168,7 +165,7 @@ public:
                             uint8_t r = (uint8_t)std::clamp(160.0f + ring * 40.0f, 0.0f, 255.0f);
                             uint8_t g = (uint8_t)std::clamp(120.0f + ring * 30.0f, 0.0f, 255.0f);
                             uint8_t b = (uint8_t)std::clamp(70.0f + ring * 20.0f, 0.0f, 255.0f);
-                            setPixel(ax, ay, r, g, b);
+                            setPixel(px, py, r, g, b);
                             break;
                         }
                         case 7: // Standard Oak Leaves
@@ -180,35 +177,34 @@ public:
                             uint8_t r = (uint8_t)std::clamp(45.0f + n * 40.0f, 0.0f, 255.0f);
                             uint8_t g = (uint8_t)std::clamp(155.0f + n * 50.0f, 0.0f, 255.0f);
                             uint8_t b = (uint8_t)std::clamp(35.0f + n * 30.0f, 0.0f, 255.0f);
-                            uint8_t alpha = leafMask(px, py, tileID) ? 255 : 0;
-                            setPixel(ax, ay, r, g, b, alpha);
+                            setPixel(px, py, r, g, b);
                             break;
                         }
                         case 8: { // Sand
                             uint8_t r = (uint8_t)std::clamp(220.0f + n * 30.0f, 0.0f, 255.0f);
                             uint8_t g = (uint8_t)std::clamp(200.0f + n * 30.0f, 0.0f, 255.0f);
                             uint8_t b = (uint8_t)std::clamp(130.0f + n * 30.0f, 0.0f, 255.0f);
-                            setPixel(ax, ay, r, g, b);
+                            setPixel(px, py, r, g, b);
                             break;
                         }
                         case 9: { // Sky Quartz
                             uint8_t r = (uint8_t)std::clamp(210.0f + n * 45.0f, 0.0f, 255.0f);
                             uint8_t g = (uint8_t)std::clamp(235.0f + n * 20.0f, 0.0f, 255.0f);
                             uint8_t b = (uint8_t)std::clamp(255.0f + n * 10.0f, 0.0f, 255.0f);
-                            setPixel(ax, ay, r, g, b);
+                            setPixel(px, py, r, g, b);
                             break;
                         }
                         case 10: { // Water
                             uint8_t r = (uint8_t)std::clamp(35.0f + n * 20.0f, 0.0f, 255.0f);
                             uint8_t g = (uint8_t)std::clamp(115.0f + n * 35.0f, 0.0f, 255.0f);
                             uint8_t b = (uint8_t)std::clamp(205.0f + n * 35.0f, 0.0f, 255.0f);
-                            setPixel(ax, ay, r, g, b);
+                            setPixel(px, py, r, g, b);
                             break;
                         }
                         case 11: { // Birch Log Side
                             float stripe = (py % 4 == 0 && (px + (py / 4) * 5) % 7 < 3) ? 0.25f : 0.95f;
                             uint8_t val = (uint8_t)std::clamp(230.0f * stripe + n * 25.0f, 0.0f, 255.0f);
-                            setPixel(ax, ay, val, val, (uint8_t)(val * 0.95f));
+                            setPixel(px, py, val, val, (uint8_t)(val * 0.95f));
                             break;
                         }
                         case 12: { // Birch Log Top
@@ -217,7 +213,7 @@ public:
                             uint8_t r = (uint8_t)std::clamp(220.0f + ring * 30.0f, 0.0f, 255.0f);
                             uint8_t g = (uint8_t)std::clamp(195.0f + ring * 25.0f, 0.0f, 255.0f);
                             uint8_t b = (uint8_t)std::clamp(140.0f + ring * 20.0f, 0.0f, 255.0f);
-                            setPixel(ax, ay, r, g, b);
+                            setPixel(px, py, r, g, b);
                             break;
                         }
                         case 13: // Light Spring Oak Leaves
@@ -229,8 +225,7 @@ public:
                             uint8_t r = (uint8_t)std::clamp(65.0f + n * 40.0f, 0.0f, 255.0f);
                             uint8_t g = (uint8_t)std::clamp(180.0f + n * 50.0f, 0.0f, 255.0f);
                             uint8_t b = (uint8_t)std::clamp(45.0f + n * 30.0f, 0.0f, 255.0f);
-                            uint8_t alpha = leafMask(px, py, tileID) ? 255 : 0;
-                            setPixel(ax, ay, r, g, b, alpha);
+                            setPixel(px, py, r, g, b);
                             break;
                         }
                         case 14: { // Pine Log Side
@@ -238,7 +233,7 @@ public:
                             uint8_t r = (uint8_t)std::clamp(75.0f + barkNoise * 35.0f, 0.0f, 255.0f);
                             uint8_t g = (uint8_t)std::clamp(45.0f + barkNoise * 25.0f, 0.0f, 255.0f);
                             uint8_t b = (uint8_t)std::clamp(25.0f + barkNoise * 15.0f, 0.0f, 255.0f);
-                            setPixel(ax, ay, r, g, b);
+                            setPixel(px, py, r, g, b);
                             break;
                         }
                         case 15: { // Pine Log Top
@@ -247,15 +242,14 @@ public:
                             uint8_t r = (uint8_t)std::clamp(130.0f + ring * 35.0f, 0.0f, 255.0f);
                             uint8_t g = (uint8_t)std::clamp(85.0f + ring * 25.0f, 0.0f, 255.0f);
                             uint8_t b = (uint8_t)std::clamp(45.0f + ring * 15.0f, 0.0f, 255.0f);
-                            setPixel(ax, ay, r, g, b);
+                            setPixel(px, py, r, g, b);
                             break;
                         }
                         case 16: { // Pine Leaves
                             uint8_t r = (uint8_t)std::clamp(20.0f + n * 30.0f, 0.0f, 255.0f);
                             uint8_t g = (uint8_t)std::clamp(100.0f + n * 45.0f, 0.0f, 255.0f);
                             uint8_t b = (uint8_t)std::clamp(45.0f + n * 35.0f, 0.0f, 255.0f);
-                            uint8_t alpha = leafMask(px, py, tileID) ? 255 : 0;
-                            setPixel(ax, ay, r, g, b, alpha);
+                            setPixel(px, py, r, g, b);
                             break;
                         }
                         case 17: { // Dark Log Side
@@ -263,7 +257,7 @@ public:
                             uint8_t r = (uint8_t)std::clamp(55.0f + barkNoise * 30.0f, 0.0f, 255.0f);
                             uint8_t g = (uint8_t)std::clamp(35.0f + barkNoise * 20.0f, 0.0f, 255.0f);
                             uint8_t b = (uint8_t)std::clamp(20.0f + barkNoise * 15.0f, 0.0f, 255.0f);
-                            setPixel(ax, ay, r, g, b);
+                            setPixel(px, py, r, g, b);
                             break;
                         }
                         case 18: { // Dark Log Top
@@ -272,7 +266,7 @@ public:
                             uint8_t r = (uint8_t)std::clamp(90.0f + ring * 30.0f, 0.0f, 255.0f);
                             uint8_t g = (uint8_t)std::clamp(60.0f + ring * 20.0f, 0.0f, 255.0f);
                             uint8_t b = (uint8_t)std::clamp(35.0f + ring * 15.0f, 0.0f, 255.0f);
-                            setPixel(ax, ay, r, g, b);
+                            setPixel(px, py, r, g, b);
                             break;
                         }
                         case 19: // Dark Forest Oak Leaves
@@ -284,8 +278,7 @@ public:
                             uint8_t r = (uint8_t)std::clamp(25.0f + n * 30.0f, 0.0f, 255.0f);
                             uint8_t g = (uint8_t)std::clamp(125.0f + n * 40.0f, 0.0f, 255.0f);
                             uint8_t b = (uint8_t)std::clamp(25.0f + n * 25.0f, 0.0f, 255.0f);
-                            uint8_t alpha = leafMask(px, py, tileID) ? 255 : 0;
-                            setPixel(ax, ay, r, g, b, alpha);
+                            setPixel(px, py, r, g, b);
                             break;
                         }
                         case 20: { // Cherry Log Side
@@ -293,7 +286,7 @@ public:
                             uint8_t r = (uint8_t)std::clamp(80.0f + barkNoise * 35.0f, 0.0f, 255.0f);
                             uint8_t g = (uint8_t)std::clamp(45.0f + barkNoise * 20.0f, 0.0f, 255.0f);
                             uint8_t b = (uint8_t)std::clamp(45.0f + barkNoise * 20.0f, 0.0f, 255.0f);
-                            setPixel(ax, ay, r, g, b);
+                            setPixel(px, py, r, g, b);
                             break;
                         }
                         case 21: { // Cherry Log Top
@@ -302,15 +295,14 @@ public:
                             uint8_t r = (uint8_t)std::clamp(150.0f + ring * 35.0f, 0.0f, 255.0f);
                             uint8_t g = (uint8_t)std::clamp(95.0f + ring * 25.0f, 0.0f, 255.0f);
                             uint8_t b = (uint8_t)std::clamp(90.0f + ring * 25.0f, 0.0f, 255.0f);
-                            setPixel(ax, ay, r, g, b);
+                            setPixel(px, py, r, g, b);
                             break;
                         }
                         case 22: { // Cherry Leaves
                             uint8_t r = (uint8_t)std::clamp(245.0f + n * 15.0f, 0.0f, 255.0f);
                             uint8_t g = (uint8_t)std::clamp(140.0f + n * 50.0f, 0.0f, 255.0f);
                             uint8_t b = (uint8_t)std::clamp(185.0f + n * 40.0f, 0.0f, 255.0f);
-                            uint8_t alpha = leafMask(px, py, tileID) ? 255 : 0;
-                            setPixel(ax, ay, r, g, b, alpha);
+                            setPixel(px, py, r, g, b);
                             break;
                         }
                         case 23: // Warm Golden-Tipped Oak Leaves
@@ -322,8 +314,7 @@ public:
                             uint8_t r = (uint8_t)std::clamp(85.0f + n * 40.0f, 0.0f, 255.0f);
                             uint8_t g = (uint8_t)std::clamp(160.0f + n * 45.0f, 0.0f, 255.0f);
                             uint8_t b = (uint8_t)std::clamp(30.0f + n * 25.0f, 0.0f, 255.0f);
-                            uint8_t alpha = leafMask(px, py, tileID) ? 255 : 0;
-                            setPixel(ax, ay, r, g, b, alpha);
+                            setPixel(px, py, r, g, b);
                             break;
                         }
                         case 24: { // Magic Log Side
@@ -331,7 +322,7 @@ public:
                             uint8_t r = rune ? 40 : (uint8_t)std::clamp(45.0f + n * 25.0f, 0.0f, 255.0f);
                             uint8_t g = rune ? 220 : (uint8_t)std::clamp(25.0f + n * 20.0f, 0.0f, 255.0f);
                             uint8_t b = rune ? 255 : (uint8_t)std::clamp(85.0f + n * 30.0f, 0.0f, 255.0f);
-                            setPixel(ax, ay, r, g, b);
+                            setPixel(px, py, r, g, b);
                             break;
                         }
                         case 25: { // Magic Log Top
@@ -340,23 +331,21 @@ public:
                             uint8_t r = (uint8_t)std::clamp(110.0f + ring * 40.0f, 0.0f, 255.0f);
                             uint8_t g = (uint8_t)std::clamp(70.0f + ring * 30.0f, 0.0f, 255.0f);
                             uint8_t b = (uint8_t)std::clamp(220.0f + ring * 35.0f, 0.0f, 255.0f);
-                            setPixel(ax, ay, r, g, b);
+                            setPixel(px, py, r, g, b);
                             break;
                         }
                         case 26: { // Magic Leaves
                             uint8_t r = (uint8_t)std::clamp(30.0f + n * 40.0f, 0.0f, 255.0f);
                             uint8_t g = (uint8_t)std::clamp(225.0f + n * 30.0f, 0.0f, 255.0f);
                             uint8_t b = (uint8_t)std::clamp(245.0f + n * 10.0f, 0.0f, 255.0f);
-                            uint8_t alpha = leafMask(px, py, tileID) ? 255 : 0;
-                            setPixel(ax, ay, r, g, b, alpha);
+                            setPixel(px, py, r, g, b);
                             break;
                         }
                         case 27: { // Golden Leaves
                             uint8_t r = (uint8_t)std::clamp(245.0f + n * 10.0f, 0.0f, 255.0f);
                             uint8_t g = (uint8_t)std::clamp(205.0f + n * 40.0f, 0.0f, 255.0f);
                             uint8_t b = (uint8_t)std::clamp(30.0f + n * 30.0f, 0.0f, 255.0f);
-                            uint8_t alpha = leafMask(px, py, tileID) ? 255 : 0;
-                            setPixel(ax, ay, r, g, b, alpha);
+                            setPixel(px, py, r, g, b);
                             break;
                         }
                         case 29: // Meadow grass lower
@@ -438,9 +427,9 @@ public:
                                     uint8_t b = seedHead
                                         ? (uint8_t)std::clamp(55.0f + shade * 20.0f, 0.0f, 255.0f)
                                         : (uint8_t)std::clamp(30.0f + shade * 35.0f, 0.0f, 255.0f);
-                                    setPixel(ax, ay, r, g, b, 255);
+                                    setPixel(px, py, r, g, b, 255);
                                 } else {
-                                    setPixel(ax, ay, 0, 0, 0, 0);
+                                    setPixel(px, py, 0, 0, 0, 0);
                                 }
                                 break;
                             }
@@ -508,35 +497,52 @@ public:
                                     g = (uint8_t)std::clamp(118.0f + shade * 70.0f, 0.0f, 255.0f);
                                     b = (uint8_t)std::clamp(30.0f + shade * 35.0f, 0.0f, 255.0f);
                                 }
-                                setPixel(ax, ay, r, g, b, 255);
+                                setPixel(px, py, r, g, b, 255);
                             } else {
-                                setPixel(ax, ay, 0, 0, 0, 0);
+                                setPixel(px, py, 0, 0, 0, 0);
                             }
                             break;
                         }
                         default: { // Fallback magenta pattern
                             bool alt = (px + py) % 2 == 0;
-                            setPixel(ax, ay, alt ? 255 : 0, 0, alt ? 255 : 0);
+                            setPixel(px, py, alt ? 255 : 0, 0, alt ? 255 : 0);
                             break;
                         }
                     }
                 }
             }
         }
+        for (int tileID = 59; tileID < MAX_TILES; ++tileID) {
+            currentTileID = tileID;
+            for (int py = 0; py < TILE_SIZE; ++py) {
+                for (int px = 0; px < TILE_SIZE; ++px) {
+                    bool alt = (px + py) % 2 == 0;
+                    setPixel(px, py, alt ? 255 : 0, 0, alt ? 255 : 0, 255);
+                }
+            }
+        }
 
         GLuint texId;
         glGenTextures(1, &texId);
-        glBindTexture(GL_TEXTURE_2D, texId);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, ATLAS_SIZE, ATLAS_SIZE, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+        glBindTexture(GL_TEXTURE_2D_ARRAY, texId);
 
-        // This is a pixel-art atlas. Mipmaps blend neighboring tiles (the
-        // unused magic/leaf tiles included), which leaks purple and blue into
-        // the grass silhouettes. Keep sampling on the authored tile pixels.
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        constexpr int mipLevels = 5; // 16, 8, 4, 2, 1
+        glTexStorage3D(GL_TEXTURE_2D_ARRAY, mipLevels, GL_RGBA8, TILE_SIZE, TILE_SIZE, MAX_TILES);
+        glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, 0, TILE_SIZE, TILE_SIZE, MAX_TILES, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+
+        glGenerateMipmap(GL_TEXTURE_2D_ARRAY);
+
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_REPEAT);
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_REPEAT);
+
+        if (epoxy_has_gl_extension("GL_EXT_texture_filter_anisotropic")) {
+            GLfloat maxAniso = 0.0f;
+            glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, &maxAniso);
+            glTexParameterf(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAX_ANISOTROPY_EXT, std::min(maxAniso, 8.0f));
+        }
+
         return texId;
     }
 };
