@@ -70,39 +70,30 @@ private:
         if (chunk.isEmpty) return;
 
         threadScratch.paddedLight.assign(PADDED_VOL, 0);
-
         threadScratch.lightQueue.clear();
         threadScratch.lightQueue.reserve(4096);
-        for (int z = -1; z <= CHUNK_SIZE; ++z) {
-            for (int x = -1; x <= CHUNK_SIZE; ++x) {
-                uint8_t topBlock = getScratchPaddedBlock(chunk, x, CHUNK_SIZE, z);
-                bool openSky = getBlockInfo(topBlock).isTransparent;
-                uint8_t skyVal = openSky ? 15 : 0;
 
-                for (int y = CHUNK_SIZE; y >= -1; --y) {
+        // Seed emissive blocks and direct skylight inside this chunk only.
+        // Cross-chunk propagation is coalesced by ChunkManager after all
+        // generated blocks are available.
+        for (int z = 0; z < CHUNK_SIZE; ++z) {
+            for (int x = 0; x < CHUNK_SIZE; ++x) {
+                uint8_t skyVal = 15;
+                for (int y = CHUNK_SIZE - 1; y >= 0; --y) {
                     uint8_t block = getScratchPaddedBlock(chunk, x, y, z);
                     const BlockInfo& info = getBlockInfo(block);
-
-                    if (!info.isTransparent) {
-                        openSky = false;
-                        skyVal = 0;
-                    }
+                    if (!info.isTransparent) skyVal = 0;
 
                     uint8_t r = info.lightR;
                     uint8_t g = info.lightG;
                     uint8_t b = info.lightB;
-                    uint8_t sky = skyVal;
-
-                    bool isBorder = (x == -1 || x == CHUNK_SIZE ||
-                                     y == -1 || y == CHUNK_SIZE ||
-                                     z == -1 || z == CHUNK_SIZE);
-                    if (isBorder && info.isTransparent && openSky) {
-                        sky = 15;
-                    }
-
-                    if (r > 0 || g > 0 || b > 0 || sky > 0) {
-                        setScratchPaddedLight(x, y, z, packLight(r, g, b, sky));
-                        threadScratch.lightQueue.push_back({static_cast<int8_t>(x), static_cast<int8_t>(y), static_cast<int8_t>(z)});
+                    if (r > 0 || g > 0 || b > 0 || skyVal > 0) {
+                        setScratchPaddedLight(x, y, z, packLight(r, g, b, skyVal));
+                        threadScratch.lightQueue.push_back({
+                            static_cast<int8_t>(x),
+                            static_cast<int8_t>(y),
+                            static_cast<int8_t>(z)
+                        });
                     }
                 }
             }
@@ -125,9 +116,11 @@ private:
                 int nx = curr.x + dx[i];
                 int ny = curr.y + dy[i];
                 int nz = curr.z + dz[i];
-
-                if (nx < -1 || nx > CHUNK_SIZE || ny < -1 || ny > CHUNK_SIZE || nz < -1 || nz > CHUNK_SIZE)
+                if (nx < 0 || nx >= CHUNK_SIZE ||
+                    ny < 0 || ny >= CHUNK_SIZE ||
+                    nz < 0 || nz >= CHUNK_SIZE) {
                     continue;
+                }
 
                 uint8_t nBlock = getScratchPaddedBlock(chunk, nx, ny, nz);
                 if (!getBlockInfo(nBlock).isTransparent) continue;
@@ -151,7 +144,11 @@ private:
 
                 if (updated) {
                     setScratchPaddedLight(nx, ny, nz, packLight(nr, ng, nb, nsky));
-                    threadScratch.lightQueue.push_back({static_cast<int8_t>(nx), static_cast<int8_t>(ny), static_cast<int8_t>(nz)});
+                    threadScratch.lightQueue.push_back({
+                        static_cast<int8_t>(nx),
+                        static_cast<int8_t>(ny),
+                        static_cast<int8_t>(nz)
+                    });
                 }
             }
         }
@@ -216,6 +213,14 @@ public:
             return ((y + 1) * GRID_DZ + (z + 3)) * GRID_DX + (x + 3);
         };
 
+        auto sampleDensity = [&](int x, int y, int z) {
+            return (*densityGrid)[gridIndex(
+                std::clamp(x, -3, 35),
+                std::clamp(y, -1, 37),
+                std::clamp(z, -3, 35)
+            )];
+        };
+
         for (int y = -1; y <= CHUNK_SIZE; ++y) {
             for (int z = -1; z <= CHUNK_SIZE; ++z) {
                 for (int x = -1; x <= CHUNK_SIZE; ++x) {
@@ -226,21 +231,21 @@ public:
                     if (inside) {
                         block = chunk.getBlock(x, y, z);
                     } else if (densityGrid) {
-                        float density = (*densityGrid)[gridIndex(x, y, z)];
+                        float density = sampleDensity(x, y, z);
                         if (density <= 0.0f) {
                             block = BLOCK_AIR;
                         } else {
-                            float aboveDensity = (*densityGrid)[gridIndex(x, y + 1, z)];
-                            float above2Density = (*densityGrid)[gridIndex(x, y + 4, z)];
+                            float aboveDensity = sampleDensity(x, y + 1, z);
+                            float above2Density = sampleDensity(x, y + 4, z);
 
-                            float nearXPos = (*densityGrid)[gridIndex(x + 1, y, z)];
-                            float nearXNeg = (*densityGrid)[gridIndex(x - 1, y, z)];
-                            float nearZPos = (*densityGrid)[gridIndex(x, y, z + 1)];
-                            float nearZNeg = (*densityGrid)[gridIndex(x, y, z - 1)];
-                            float farXPos = (*densityGrid)[gridIndex(x + 3, y, z)];
-                            float farXNeg = (*densityGrid)[gridIndex(x - 3, y, z)];
-                            float farZPos = (*densityGrid)[gridIndex(x, y, z + 3)];
-                            float farZNeg = (*densityGrid)[gridIndex(x, y, z - 3)];
+                            float nearXPos = sampleDensity(x + 1, y, z);
+                            float nearXNeg = sampleDensity(x - 1, y, z);
+                            float nearZPos = sampleDensity(x, y, z + 1);
+                            float nearZNeg = sampleDensity(x, y, z - 1);
+                            float farXPos = sampleDensity(x + 3, y, z);
+                            float farXNeg = sampleDensity(x - 3, y, z);
+                            float farZPos = sampleDensity(x, y, z + 3);
+                            float farZNeg = sampleDensity(x, y, z - 3);
 
                             float sharpness = WorldGen::getDeepStoneSharpnessFromValues(
                                 density, nearXPos, nearXNeg, nearZPos, nearZNeg,
@@ -371,19 +376,61 @@ public:
             }
         }
 
-        for (int z = 0; z < CHUNK_SIZE; ++z) {
-            for (int y = 0; y < CHUNK_SIZE; ++y) {
-                for (int x = 0; x < CHUNK_SIZE; ++x) {
-                    if (densityGrid[gridIndex(x, y, z)] > 0.0f) continue;
-                    int64_t wx = wmx + x * scale + scale / 2;
-                    int64_t wy = wmy + y * scale + scale / 2;
-                    int64_t wz = wmz + z * scale + scale / 2;
-                    uint8_t block = WorldGen::getTreeBlockFromSites(
-                        treeSites, wx, wy, wz, scale
-                    );
-                    if (block != BLOCK_AIR) {
-                        chunk.setBlock(x, y, z, block);
-                        hasSolid = true;
+        auto floorDiv = [](int64_t a, int64_t b) {
+            int64_t quotient = a / b;
+            int64_t remainder = a % b;
+            if (remainder != 0 && ((a < 0) ^ (b < 0))) --quotient;
+            return quotient;
+        };
+        auto ceilDiv = [&](int64_t a, int64_t b) {
+            return -floorDiv(-a, b);
+        };
+        auto cellRange = [&](int64_t minWorld, int64_t maxWorld, int64_t worldOrigin) {
+            int64_t minCell = ceilDiv(minWorld - worldOrigin - scale / 2, scale);
+            int64_t maxCell = floorDiv(maxWorld - worldOrigin - scale / 2, scale);
+            return std::pair<int, int>(
+                static_cast<int>(std::max<int64_t>(0, minCell)),
+                static_cast<int>(std::min<int64_t>(CHUNK_SIZE - 1, maxCell))
+            );
+        };
+
+        // Evaluate each tree only inside its world-space footprint. The old
+        // voxel-first pass tested every empty voxel against every nearby tree.
+        for (const WorldGen::TreeSite& tree : treeSites) {
+            auto xRange = cellRange(
+                tree.tx - WorldGen::TREE_MAX_RADIUS,
+                tree.tx + WorldGen::TREE_MAX_RADIUS,
+                wmx
+            );
+            auto yRange = cellRange(tree.groundY, tree.groundY + 30, wmy);
+            auto zRange = cellRange(
+                tree.tz - WorldGen::TREE_MAX_RADIUS,
+                tree.tz + WorldGen::TREE_MAX_RADIUS,
+                wmz
+            );
+            if (xRange.first > xRange.second ||
+                yRange.first > yRange.second ||
+                zRange.first > zRange.second) {
+                continue;
+            }
+
+            for (int z = zRange.first; z <= zRange.second; ++z) {
+                for (int y = yRange.first; y <= yRange.second; ++y) {
+                    for (int x = xRange.first; x <= xRange.second; ++x) {
+                        if (densityGrid[gridIndex(x, y, z)] > 0.0f ||
+                            chunk.getBlock(x, y, z) != BLOCK_AIR) {
+                            continue;
+                        }
+                        int64_t wx = wmx + x * scale + scale / 2;
+                        int64_t wy = wmy + y * scale + scale / 2;
+                        int64_t wz = wmz + z * scale + scale / 2;
+                        uint8_t block = WorldGen::evaluateTreeSite(
+                            tree, wx, wy, wz, scale
+                        );
+                        if (block != BLOCK_AIR) {
+                            chunk.setBlock(x, y, z, block);
+                            hasSolid = true;
+                        }
                     }
                 }
             }
@@ -535,6 +582,81 @@ public:
         finalizeVoxelData(chunk, &densityGrid, neighborhood);
     }
 
+    static void updateNeighborhood(
+        const Chunk& chunk,
+        MeshingNeighborhood& neighborhood,
+        const std::array<std::shared_ptr<Chunk>, 6>& neighbors,
+        bool rebuildBlocks = false
+    ) {
+        if (rebuildBlocks) {
+            neighborhood.blocks.fill(BLOCK_AIR);
+        }
+        neighborhood.light.fill(0);
+
+        for (int y = 0; y < CHUNK_SIZE; ++y) {
+            for (int z = 0; z < CHUNK_SIZE; ++z) {
+                for (int x = 0; x < CHUNK_SIZE; ++x) {
+                    neighborhood.blocks[getPaddedVoxelIndex(x, y, z)] =
+                        chunk.getBlock(x, y, z);
+                    neighborhood.light[getPaddedVoxelIndex(x, y, z)] =
+                        chunk.getLight(x, y, z);
+                }
+            }
+        }
+
+        for (int y = -1; y <= CHUNK_SIZE; ++y) {
+            for (int z = -1; z <= CHUNK_SIZE; ++z) {
+                for (int x = -1; x <= CHUNK_SIZE; ++x) {
+                    int outsideCount = (x < 0 || x >= CHUNK_SIZE ? 1 : 0) +
+                        (y < 0 || y >= CHUNK_SIZE ? 1 : 0) +
+                        (z < 0 || z >= CHUNK_SIZE ? 1 : 0);
+                    if (outsideCount != 1) continue;
+
+                    int direction = -1;
+                    int nx = x;
+                    int ny = y;
+                    int nz = z;
+                    if (x < 0) {
+                        direction = DIR_NEG_X;
+                        nx = CHUNK_SIZE - 1;
+                    } else if (x >= CHUNK_SIZE) {
+                        direction = DIR_POS_X;
+                        nx = 0;
+                    } else if (y < 0) {
+                        direction = DIR_NEG_Y;
+                        ny = CHUNK_SIZE - 1;
+                    } else if (y >= CHUNK_SIZE) {
+                        direction = DIR_POS_Y;
+                        ny = 0;
+                    } else if (z < 0) {
+                        direction = DIR_NEG_Z;
+                        nz = CHUNK_SIZE - 1;
+                    } else {
+                        direction = DIR_POS_Z;
+                        nz = 0;
+                    }
+
+                    const std::shared_ptr<Chunk>& neighbor = neighbors[direction];
+                    bool neighborReady = neighbor &&
+                        neighbor->resident.load(std::memory_order_acquire) &&
+                        neighbor->isGenerated.load(std::memory_order_acquire);
+                    int paddedIndex = getPaddedVoxelIndex(x, y, z);
+                    if (neighborReady) {
+                        neighborhood.blocks[paddedIndex] =
+                            neighbor->getBlock(nx, ny, nz);
+                        neighborhood.light[paddedIndex] =
+                            neighbor->getLight(nx, ny, nz);
+                    } else if (y == CHUNK_SIZE &&
+                               getBlockInfo(neighborhood.blocks[paddedIndex]).isTransparent) {
+                        // A missing upper chunk is treated as open sky until
+                        // its resident neighbor can provide a real boundary.
+                        neighborhood.light[paddedIndex] = packLight(0, 0, 0, 15);
+                    }
+                }
+            }
+        }
+    }
+
     static void buildMesh(Chunk& chunk, const MeshingNeighborhood* neighborhood = nullptr) {
         chunk.stagedIndices.clear();
         chunk.stagedVertices.reserve(8192);
@@ -671,11 +793,24 @@ public:
                     vert.v = quadUV[c][1];
                     vert.texIndex = static_cast<float>(texTileID);
                     vert.ao = 1.0f;
-                    uint16_t plantL = chunk.getLight(
-                        std::clamp(static_cast<int>(blockRelX / fScale), 0, CHUNK_SIZE - 1),
-                        std::clamp(static_cast<int>((blockRelY + 0.05f) / fScale), 0, CHUNK_SIZE - 1),
-                        std::clamp(static_cast<int>(blockRelZ / fScale), 0, CHUNK_SIZE - 1)
+                    int plantX = std::clamp(
+                        static_cast<int>(blockRelX / fScale),
+                        0,
+                        CHUNK_SIZE - 1
                     );
+                    int plantY = std::clamp(
+                        static_cast<int>((blockRelY + 0.05f) / fScale),
+                        0,
+                        CHUNK_SIZE - 1
+                    );
+                    int plantZ = std::clamp(
+                        static_cast<int>(blockRelZ / fScale),
+                        0,
+                        CHUNK_SIZE - 1
+                    );
+                    uint16_t plantL = neighborhood
+                        ? neighborhood->lightAt(plantX, plantY, plantZ)
+                        : chunk.getLight(plantX, plantY, plantZ);
                     vert.lightR = static_cast<float>(getLightR(plantL)) / 15.0f;
                     vert.lightG = static_cast<float>(getLightG(plantL)) / 15.0f;
                     vert.lightB = static_cast<float>(getLightB(plantL)) / 15.0f;

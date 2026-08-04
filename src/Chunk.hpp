@@ -44,8 +44,11 @@ struct Chunk {
     uint16_t light[CHUNK_VOL];
     bool isEmpty = true;
     std::atomic<bool> isGenerated{false};
+    std::atomic<bool> isLightReady{false};
     std::atomic<bool> isMeshStaged{false};
     std::atomic<bool> isMeshUploaded{false};
+    std::atomic<bool> isMeshQueued{false};
+    std::atomic<bool> meshDirty{true};
     std::atomic<bool> isPendingWork{true};
     std::atomic<bool> resident{true};
     std::atomic<uint64_t> workToken{0};

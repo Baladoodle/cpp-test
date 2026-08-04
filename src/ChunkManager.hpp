@@ -14,6 +14,7 @@
 #include <atomic>
 #include <memory>
 #include <algorithm>
+#include <deque>
 #include <iostream>
 #include <cmath>
 
@@ -61,11 +62,18 @@ private:
         }
         return res;
     }
+    enum class WorkType : uint8_t {
+        Generate,
+        Mesh
+    };
+
     struct GenerationTask {
         std::shared_ptr<Chunk> chunk;
         float priority; // normalized distance squared: distSq / (worldSize * worldSize)
         uint64_t sequence;
         uint64_t workToken;
+        WorkType type;
+        std::shared_ptr<MeshingNeighborhood> neighborhood;
 
         bool operator<(const GenerationTask& other) const {
             if (priority == other.priority) {
@@ -82,12 +90,32 @@ private:
     std::atomic<bool> stopThreads{false};
     std::atomic<uint64_t> queueSequence{0};
 
+    struct LightingReadyChunk {
+        std::shared_ptr<Chunk> chunk;
+        std::shared_ptr<MeshingNeighborhood> neighborhood;
+        uint64_t workToken;
+    };
+
+    struct LightNode {
+        std::shared_ptr<Chunk> chunk;
+        int8_t x;
+        int8_t y;
+        int8_t z;
+    };
+
+    std::vector<LightingReadyChunk> lightingReadyQueue;
+    std::mutex lightingMutex;
+    std::deque<LightNode> lightQueue;
+    std::unordered_map<Chunk*, std::shared_ptr<MeshingNeighborhood>> pendingNeighborhoods;
     static void cancelTaskIfCurrent(const GenerationTask& task) {
         if (!task.chunk) return;
         uint64_t currentToken = task.chunk->workToken.load();
         if (currentToken == task.workToken &&
             task.chunk->workToken.compare_exchange_strong(currentToken, currentToken + 1)) {
             task.chunk->isPendingWork.store(false);
+            if (task.type == WorkType::Mesh) {
+                task.chunk->isMeshQueued.store(false);
+            }
         }
     }
 public:
@@ -404,8 +432,11 @@ private:
             chunk,
             normDistSq,
             queueSequence.fetch_add(1),
-            chunk->workToken.fetch_add(1) + 1
+            chunk->workToken.fetch_add(1) + 1,
+            WorkType::Generate,
+            nullptr
         };
+        chunk->isPendingWork.store(true);
         {
             std::lock_guard<std::mutex> lock(queueMutex);
             if (generateQueue.size() >= MAX_PENDING_GENERATION_TASKS) {
@@ -423,7 +454,7 @@ private:
                 for (GenerationTask& t : kept) generateQueue.push(std::move(t));
             }
             if (generateQueue.size() < MAX_PENDING_GENERATION_TASKS) {
-                generateQueue.push(task);
+                generateQueue.push(std::move(task));
             } else {
                 cancelTaskIfCurrent(task);
                 return;
@@ -431,10 +462,301 @@ private:
         }
         cv.notify_one();
     }
+    std::array<std::shared_ptr<Chunk>, 6> getSameLodNeighbors(const Chunk& chunk) const {
+        std::array<std::shared_ptr<Chunk>, 6> neighbors{};
+        const int dx[6] = { 1, -1,  0,  0,  0,  0 };
+        const int dy[6] = { 0,  0,  1, -1,  0,  0 };
+        const int dz[6] = { 0,  0, 0,  0,  1, -1 };
+        for (int direction = 0; direction < 6; ++direction) {
+            IVec3 neighborPos(
+                chunk.chunkPos.x + dx[direction],
+                chunk.chunkPos.y + dy[direction],
+                chunk.chunkPos.z + dz[direction]
+            );
+            auto it = chunks[chunk.lod].find(neighborPos);
+            if (it != chunks[chunk.lod].end()) {
+                neighbors[direction] = it->second;
+            }
+        }
+        return neighbors;
+    }
+
+    void enqueueLightFace(const std::shared_ptr<Chunk>& chunk, int direction) {
+        if (!chunk || !chunk->isGenerated.load(std::memory_order_acquire)) return;
+        for (int a = 0; a < CHUNK_SIZE; ++a) {
+            for (int b = 0; b < CHUNK_SIZE; ++b) {
+                int x = 0;
+                int y = 0;
+                int z = 0;
+                switch (direction) {
+                    case DIR_POS_X: x = CHUNK_SIZE - 1; y = a; z = b; break;
+                    case DIR_NEG_X: x = 0; y = a; z = b; break;
+                    case DIR_POS_Y: x = a; y = CHUNK_SIZE - 1; z = b; break;
+                    case DIR_NEG_Y: x = a; y = 0; z = b; break;
+                    case DIR_POS_Z: x = a; y = b; z = CHUNK_SIZE - 1; break;
+                    case DIR_NEG_Z: x = a; y = b; z = 0; break;
+                    default: continue;
+                }
+                if (chunk->getLight(x, y, z) != 0) {
+                    lightQueue.push_back({
+                        chunk,
+                        static_cast<int8_t>(x),
+                        static_cast<int8_t>(y),
+                        static_cast<int8_t>(z)
+                    });
+                }
+            }
+        }
+    }
+
+    void enqueueBoundaryLight(const std::shared_ptr<Chunk>& chunk) {
+        for (int direction = 0; direction < 6; ++direction) {
+            enqueueLightFace(chunk, direction);
+        }
+    }
+
+    void propagateWorldLighting(std::unordered_set<Chunk*>& changedChunks) {
+        const int dx[6] = { 1, -1,  0,  0,  0,  0 };
+        const int dy[6] = { 0,  0,  1, -1,  0,  0 };
+        const int dz[6] = { 0,  0,  0,  0,  1, -1 };
+
+        while (!lightQueue.empty()) {
+            LightNode node = std::move(lightQueue.front());
+            lightQueue.pop_front();
+            if (!node.chunk ||
+                !node.chunk->resident.load(std::memory_order_acquire) ||
+                !node.chunk->isGenerated.load(std::memory_order_acquire)) {
+                continue;
+            }
+
+            uint16_t currentLight = node.chunk->getLight(node.x, node.y, node.z);
+            uint8_t cr = getLightR(currentLight);
+            uint8_t cg = getLightG(currentLight);
+            uint8_t cb = getLightB(currentLight);
+            uint8_t csky = getLightSky(currentLight);
+            if (cr == 0 && cg == 0 && cb == 0 && csky == 0) continue;
+
+            for (int direction = 0; direction < 6; ++direction) {
+                int nx = static_cast<int>(node.x) + dx[direction];
+                int ny = static_cast<int>(node.y) + dy[direction];
+                int nz = static_cast<int>(node.z) + dz[direction];
+                std::shared_ptr<Chunk> neighbor = node.chunk;
+
+                if (nx < 0 || nx >= CHUNK_SIZE ||
+                    ny < 0 || ny >= CHUNK_SIZE ||
+                    nz < 0 || nz >= CHUNK_SIZE) {
+                    IVec3 neighborPos = node.chunk->chunkPos;
+                    if (nx < 0) {
+                        --neighborPos.x;
+                        nx = CHUNK_SIZE - 1;
+                    } else if (nx >= CHUNK_SIZE) {
+                        ++neighborPos.x;
+                        nx = 0;
+                    } else if (ny < 0) {
+                        --neighborPos.y;
+                        ny = CHUNK_SIZE - 1;
+                    } else if (ny >= CHUNK_SIZE) {
+                        ++neighborPos.y;
+                        ny = 0;
+                    } else if (nz < 0) {
+                        --neighborPos.z;
+                        nz = CHUNK_SIZE - 1;
+                    } else {
+                        ++neighborPos.z;
+                        nz = 0;
+                    }
+                    auto it = chunks[node.chunk->lod].find(neighborPos);
+                    if (it == chunks[node.chunk->lod].end()) continue;
+                    neighbor = it->second;
+                    if (!neighbor ||
+                        !neighbor->resident.load(std::memory_order_acquire) ||
+                        !neighbor->isGenerated.load(std::memory_order_acquire)) {
+                        continue;
+                    }
+                }
+
+                if (!getBlockInfo(neighbor->getBlock(nx, ny, nz)).isTransparent) {
+                    continue;
+                }
+
+                uint16_t neighborLight = neighbor->getLight(nx, ny, nz);
+                uint8_t nr = getLightR(neighborLight);
+                uint8_t ng = getLightG(neighborLight);
+                uint8_t nb = getLightB(neighborLight);
+                uint8_t nsky = getLightSky(neighborLight);
+                uint8_t tr = cr > 1 ? cr - 1 : 0;
+                uint8_t tg = cg > 1 ? cg - 1 : 0;
+                uint8_t tb = cb > 1 ? cb - 1 : 0;
+                uint8_t tsky = csky > 1 ? csky - 1 : 0;
+                bool updated = false;
+                if (tr > nr) { nr = tr; updated = true; }
+                if (tg > ng) { ng = tg; updated = true; }
+                if (tb > nb) { nb = tb; updated = true; }
+                if (tsky > nsky) { nsky = tsky; updated = true; }
+                if (!updated) continue;
+
+                neighbor->setLight(nx, ny, nz, packLight(nr, ng, nb, nsky));
+                changedChunks.insert(neighbor.get());
+                lightQueue.push_back({
+                    neighbor,
+                    static_cast<int8_t>(nx),
+                    static_cast<int8_t>(ny),
+                    static_cast<int8_t>(nz)
+                });
+            }
+        }
+    }
+
+    bool enqueueMesh(
+        const std::shared_ptr<Chunk>& chunk,
+        std::shared_ptr<MeshingNeighborhood> neighborhood,
+        const Vec3& cameraPos
+    ) {
+        if (!chunk || !neighborhood ||
+            !chunk->resident.load(std::memory_order_acquire) ||
+            !chunk->isGenerated.load(std::memory_order_acquire) ||
+            !chunk->isLightReady.load(std::memory_order_acquire)) {
+            return false;
+        }
+        bool expected = false;
+        if (!chunk->isMeshQueued.compare_exchange_strong(expected, true)) {
+            return false;
+        }
+
+        GenerationTask task{
+            chunk,
+            calculateTaskPriority(*chunk, cameraPos),
+            queueSequence.fetch_add(1),
+            chunk->workToken.fetch_add(1) + 1,
+            WorkType::Mesh,
+            std::move(neighborhood)
+        };
+        chunk->isPendingWork.store(true);
+        {
+            std::lock_guard<std::mutex> lock(queueMutex);
+            if (generateQueue.size() >= MAX_PENDING_GENERATION_TASKS) {
+                cancelTaskIfCurrent(task);
+                return false;
+            }
+            generateQueue.push(std::move(task));
+        }
+        cv.notify_one();
+        return true;
+    }
+
+    void processLighting() {
+        std::vector<LightingReadyChunk> ready;
+        {
+            std::lock_guard<std::mutex> lock(lightingMutex);
+            ready.swap(lightingReadyQueue);
+        }
+
+        std::vector<std::shared_ptr<Chunk>> candidates;
+        std::unordered_set<Chunk*> candidateSet;
+        auto addCandidate = [&](const std::shared_ptr<Chunk>& chunk) {
+            if (chunk && candidateSet.insert(chunk.get()).second) {
+                candidates.push_back(chunk);
+            }
+        };
+
+        for (LightingReadyChunk& item : ready) {
+            const std::shared_ptr<Chunk>& chunk = item.chunk;
+            if (!chunk ||
+                !chunk->resident.load(std::memory_order_acquire) ||
+                chunk->workToken.load(std::memory_order_acquire) != item.workToken) {
+                continue;
+            }
+            pendingNeighborhoods[chunk.get()] = std::move(item.neighborhood);
+            chunk->isLightReady.store(false);
+            chunk->meshDirty.store(true);
+            enqueueBoundaryLight(chunk);
+            std::array<std::shared_ptr<Chunk>, 6> neighbors =
+                getSameLodNeighbors(*chunk);
+            for (int direction = 0; direction < 6; ++direction) {
+                std::shared_ptr<Chunk>& neighbor = neighbors[direction];
+                if (neighbor && neighbor->isGenerated.load(std::memory_order_acquire)) {
+                    enqueueLightFace(neighbor, direction ^ 1);
+                }
+            }
+            addCandidate(chunk);
+        }
+
+        std::unordered_set<Chunk*> changedChunks;
+        propagateWorldLighting(changedChunks);
+        for (Chunk* rawChunk : changedChunks) {
+            if (!rawChunk || !rawChunk->resident.load(std::memory_order_acquire)) continue;
+            rawChunk->meshDirty.store(true);
+            auto it = chunks[rawChunk->lod].find(rawChunk->chunkPos);
+            if (it != chunks[rawChunk->lod].end() && it->second.get() == rawChunk) {
+                addCandidate(it->second);
+            }
+        }
+
+        for (const auto& entry : pendingNeighborhoods) {
+            if (!entry.first) continue;
+            auto it = chunks[entry.first->lod].find(entry.first->chunkPos);
+            if (it != chunks[entry.first->lod].end() &&
+                it->second.get() == entry.first) {
+                addCandidate(it->second);
+            }
+        }
+        // A neighbor can dirty a chunk while its previous mesh is already
+        // staged. Keep the rebuild request alive until that upload completes.
+        for (int lod = 0; lod < NUM_LODS; ++lod) {
+            for (const auto& pair : chunks[lod]) {
+                if (pair.second &&
+                    pair.second->meshDirty.load(std::memory_order_acquire) &&
+                    pair.second->isLightReady.load(std::memory_order_acquire)) {
+                    addCandidate(pair.second);
+                }
+            }
+        }
+
+        for (const std::shared_ptr<Chunk>& chunk : candidates) {
+            if (!chunk ||
+                !chunk->resident.load(std::memory_order_acquire) ||
+                !chunk->isGenerated.load(std::memory_order_acquire)) {
+                continue;
+            }
+            chunk->isLightReady.store(true);
+            if (!chunk->meshDirty.load() ||
+                chunk->isMeshQueued.load() ||
+                chunk->isMeshStaged.load()) {
+                continue;
+            }
+
+            auto pending = pendingNeighborhoods.find(chunk.get());
+            if (pending == pendingNeighborhoods.end()) {
+                pending = pendingNeighborhoods.emplace(
+                    chunk.get(),
+                    std::make_shared<MeshingNeighborhood>()
+                ).first;
+            }
+            std::array<std::shared_ptr<Chunk>, 6> neighbors =
+                getSameLodNeighbors(*chunk);
+            MeshBuilder::updateNeighborhood(
+                *chunk,
+                *pending->second,
+                neighbors
+            );
+            if (enqueueMesh(chunk, pending->second, currentCamPos)) {
+                chunk->meshDirty.store(false);
+                pendingNeighborhoods.erase(pending);
+            }
+        }
+    }
+
 
     void workerThreadFunc() {
         while (!stopThreads) {
-            GenerationTask task{ nullptr, 0.0f, 0, 0 };
+            GenerationTask task{
+                nullptr,
+                0.0f,
+                0,
+                0,
+                WorkType::Generate,
+                nullptr
+            };
             {
                 std::unique_lock<std::mutex> lock(queueMutex);
                 cv.wait(lock, [this]() { return stopThreads || !generateQueue.empty(); });
@@ -446,50 +768,94 @@ private:
             }
 
             std::shared_ptr<Chunk> chunk = std::move(task.chunk);
+            if (!chunk) continue;
 
-            if (chunk) {
-                if (!chunk->resident.load(std::memory_order_acquire) ||
-                    chunk->workToken.load(std::memory_order_acquire) != task.workToken) continue;
-                Vec3 cameraSnapshot;
-                {
-                    std::lock_guard<std::mutex> cameraLock(cameraMutex);
-                    cameraSnapshot = currentCamPos;
+            if (!chunk->resident.load(std::memory_order_acquire) ||
+                chunk->workToken.load(std::memory_order_acquire) != task.workToken) {
+                cancelTaskIfCurrent(task);
+                continue;
+            }
+
+            Vec3 cameraSnapshot;
+            {
+                std::lock_guard<std::mutex> cameraLock(cameraMutex);
+                cameraSnapshot = currentCamPos;
+            }
+            if (isChunkOutsideGenerationWindow(chunk.get(), cameraSnapshot)) {
+                cancelTaskIfCurrent(task);
+                continue;
+            }
+
+            if (task.type == WorkType::Generate) {
+                if (chunk->isGenerated.load(std::memory_order_acquire)) {
+                    if (chunk->workToken.load() == task.workToken) {
+                        chunk->isPendingWork.store(false);
+                    }
+                    continue;
                 }
-                if (isChunkOutsideGenerationWindow(chunk.get(), cameraSnapshot)) {
+
+                auto t0 = std::chrono::high_resolution_clock::now();
+                auto neighborhood = std::make_shared<MeshingNeighborhood>();
+                MeshBuilder::generateVoxelData(*chunk, neighborhood.get());
+                auto t1 = std::chrono::high_resolution_clock::now();
+                totalGenTimeUs += std::chrono::duration_cast<std::chrono::microseconds>(
+                    t1 - t0
+                ).count();
+                chunksProcessed++;
+
+                bool taskValid = chunk->resident.load(std::memory_order_acquire) &&
+                    chunk->workToken.load(std::memory_order_acquire) == task.workToken;
+                if (taskValid) {
+                    std::lock_guard<std::mutex> lock(lightingMutex);
+                    lightingReadyQueue.push_back({
+                        chunk,
+                        std::move(neighborhood),
+                        task.workToken
+                    });
+                } else {
+                    chunk->isGenerated.store(false);
+                    chunk->isLightReady.store(false);
+                }
+            } else {
+                if (!task.neighborhood ||
+                    !chunk->isLightReady.load(std::memory_order_acquire)) {
                     cancelTaskIfCurrent(task);
                     continue;
                 }
 
-                if (!chunk->isGenerated.load()) {
-                    auto t0 = std::chrono::high_resolution_clock::now();
-                    MeshingNeighborhood neighborhood;
-                    MeshBuilder::generateVoxelData(*chunk, &neighborhood);
-                    auto t1 = std::chrono::high_resolution_clock::now();
-                    while (!stopThreads && stagedMeshBytes.load(std::memory_order_relaxed) >= MAX_STAGED_MESH_BYTES) {
-                        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                    }
-                    MeshBuilder::buildMesh(*chunk, &neighborhood);
-                    auto t2 = std::chrono::high_resolution_clock::now();
-                    totalGenTimeUs += std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
-                    totalMeshTimeUs += std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count();
-                    chunksProcessed++;
-                    bool taskValid = chunk->resident.load(std::memory_order_acquire) &&
-                        chunk->workToken.load(std::memory_order_acquire) == task.workToken;
-                    if (taskValid && chunk->isMeshStaged.load()) {
-                        size_t bytes = chunk->stagedVertices.size() * sizeof(VoxelVertex) +
-                                       chunk->stagedIndices.size() * sizeof(uint32_t);
-                        stagedMeshBytes.fetch_add(bytes, std::memory_order_relaxed);
-                        std::lock_guard<std::mutex> lock(stagedMutex);
-                        stagedMeshQueue.push_back(chunk);
-                    } else {
-                        chunk->stagedVertices.clear();
-                        chunk->stagedIndices.clear();
-                        chunk->isMeshStaged.store(false);
-                    }
+                auto t0 = std::chrono::high_resolution_clock::now();
+                while (!stopThreads &&
+                       stagedMeshBytes.load(std::memory_order_relaxed) >= MAX_STAGED_MESH_BYTES) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 }
+                MeshBuilder::buildMesh(*chunk, task.neighborhood.get());
+                auto t1 = std::chrono::high_resolution_clock::now();
+                totalMeshTimeUs += std::chrono::duration_cast<std::chrono::microseconds>(
+                    t1 - t0
+                ).count();
+
+                bool taskValid = chunk->resident.load(std::memory_order_acquire) &&
+                    chunk->workToken.load(std::memory_order_acquire) == task.workToken &&
+                    chunk->isMeshStaged.load(std::memory_order_acquire);
+                if (taskValid) {
+                    size_t bytes = chunk->stagedVertices.size() * sizeof(VoxelVertex) +
+                                   chunk->stagedIndices.size() * sizeof(uint32_t);
+                    stagedMeshBytes.fetch_add(bytes, std::memory_order_relaxed);
+                    std::lock_guard<std::mutex> lock(stagedMutex);
+                    stagedMeshQueue.push_back(chunk);
+                } else {
+                    chunk->stagedVertices.clear();
+                    chunk->stagedIndices.clear();
+                    chunk->isMeshStaged.store(false);
+                }
+
                 if (chunk->workToken.load() == task.workToken) {
-                    chunk->isPendingWork.store(false);
+                    chunk->isMeshQueued.store(false);
                 }
+            }
+
+            if (chunk->workToken.load() == task.workToken) {
+                chunk->isPendingWork.store(false);
             }
         }
     }
@@ -613,6 +979,7 @@ public:
                     if (isChunkOutOfRange(chunk, cameraPos)) {
                         chunk->resident.store(false, std::memory_order_release);
                         chunk->workToken.fetch_add(1, std::memory_order_acq_rel);
+                        pendingNeighborhoods.erase(chunk);
                         geometryArena.release(chunk->mesh.geometry);
                         ++sceneRevision;
                         chunk->mesh.cleanUp();
@@ -671,6 +1038,7 @@ public:
                 }
             }
         }
+        processLighting();
 
     }
 

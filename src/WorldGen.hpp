@@ -14,6 +14,7 @@ private:
         return (a >= 0) ? (a / b) : ((a - b + 1) / b);
     }
 
+
     static inline uint64_t treeHash(int64_t tx, int64_t tz) {
         uint64_t h = static_cast<uint64_t>(tx) * 0x9E3779B185EBCA87ULL ^ static_cast<uint64_t>(tz) * 0xC2B2AE3D27D4EB4FULL;
         h ^= h >> 30;
@@ -93,6 +94,7 @@ private:
         bool valid = false;
     };
 public:
+    static constexpr int64_t TREE_MAX_RADIUS = 8;
     // evaluates the tree block at one world position.
     struct TreeSite {
         int64_t tx;
@@ -256,10 +258,10 @@ public:
     ) {
         outTrees.clear();
         constexpr int64_t CELL_SIZE = 5;
-        int64_t minCX = floorDiv(minWX - 6, CELL_SIZE);
-        int64_t maxCX = floorDiv(maxWX + 6, CELL_SIZE);
-        int64_t minCZ = floorDiv(minWZ - 6, CELL_SIZE);
-        int64_t maxCZ = floorDiv(maxWZ + 6, CELL_SIZE);
+        int64_t minCX = floorDiv(minWX - TREE_MAX_RADIUS, CELL_SIZE);
+        int64_t maxCX = floorDiv(maxWX + TREE_MAX_RADIUS, CELL_SIZE);
+        int64_t minCZ = floorDiv(minWZ - TREE_MAX_RADIUS, CELL_SIZE);
+        int64_t maxCZ = floorDiv(maxWZ + TREE_MAX_RADIUS, CELL_SIZE);
 
         for (int64_t cz = minCZ; cz <= maxCZ; ++cz) {
             for (int64_t cx = minCX; cx <= maxCX; ++cx) {
@@ -272,8 +274,8 @@ public:
 
                 int64_t tx = cx * CELL_SIZE + static_cast<int64_t>(hash % CELL_SIZE);
                 int64_t tz = cz * CELL_SIZE + static_cast<int64_t>((hash >> 8) % CELL_SIZE);
-                if (tx < minWX - 6 || tx > maxWX + 6 ||
-                    tz < minWZ - 6 || tz > maxWZ + 6) {
+                if (tx < minWX - TREE_MAX_RADIUS || tx > maxWX + TREE_MAX_RADIUS ||
+                    tz < minWZ - TREE_MAX_RADIUS || tz > maxWZ + TREE_MAX_RADIUS) {
                     continue;
                 }
 
@@ -316,8 +318,8 @@ public:
     ) {
         if (wy < -40 || wy > 300) return BLOCK_AIR;
         for (const TreeSite& tree : trees) {
-            if (std::abs(wx - tree.tx) > 6 ||
-                std::abs(wz - tree.tz) > 6 ||
+            if (std::abs(wx - tree.tx) > TREE_MAX_RADIUS ||
+                std::abs(wz - tree.tz) > TREE_MAX_RADIUS ||
                 wy < tree.groundY ||
                 wy > tree.groundY + 30) {
                 continue;
@@ -355,7 +357,8 @@ public:
                 int64_t tx = cx * cellSize + targetX;
                 int64_t tz = cz * cellSize + targetZ;
 
-                if (std::abs(wx - tx) > 6 || std::abs(wz - tz) > 6) continue;
+                if (std::abs(wx - tx) > TREE_MAX_RADIUS ||
+                    std::abs(wz - tz) > TREE_MAX_RADIUS) continue;
 
                 static thread_local TreeCandidateCacheEntry cache[2048];
                 uint32_t slot = static_cast<uint32_t>(

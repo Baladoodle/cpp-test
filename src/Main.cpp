@@ -278,7 +278,12 @@ int main(int argc, char** argv) {
             }
 
             // Total Combined Surface Illumination
-            vec3 totalLight = hemiAmbient + directSun * 0.8 + emissiveRGB + extraFoliageLight;
+            float sky = clamp(vSkyLight, 0.0, 1.0);
+            vec3 totalLight =
+                hemiAmbient * mix(0.12, 1.0, sky) +
+                directSun * 0.8 * sky +
+                emissiveRGB +
+                extraFoliageLight;
 
             // Linear Contact Ambient Occlusion (prevents Mach band / pow artifacting on greedy quads)
             float smoothAO = mix(0.35, 1.0, vAO);
