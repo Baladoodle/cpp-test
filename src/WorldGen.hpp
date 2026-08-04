@@ -283,8 +283,8 @@ public:
                 float floraPatchNoise = getFloraPatchNoise(tx, tz);
                 if (lakeNoise >= 0.72f || floraPatchNoise <= 0.40f) continue;
 
-                int64_t groundY = getSurfaceYAt(tx, tz, minWY - 30, maxWY);
-                if (groundY <= -900 || maxWY < groundY || minWY > groundY + 30) continue;
+                int64_t groundY = getSurfaceYAt(tx, tz, minWY - 32, maxWY);
+                if (groundY <= -900 || maxWY < groundY || minWY > groundY + 32) continue;
 
                 // groundY from getSurfaceYAt already guarantees groundDensity > 0 and aboveGroundDensity <= 0
 
@@ -321,7 +321,7 @@ public:
             if (std::abs(wx - tree.tx) > TREE_MAX_RADIUS ||
                 std::abs(wz - tree.tz) > TREE_MAX_RADIUS ||
                 wy < tree.groundY ||
-                wy > tree.groundY + 30) {
+                wy > tree.groundY + 32) {
                 continue;
             }
             uint8_t block = evaluateTreeSite(tree, wx, wy, wz, scale);
@@ -341,8 +341,8 @@ public:
         float fwy = static_cast<float>(wy);
         float fwz = static_cast<float>(wz);
 
-        for (int dz = -1; dz <= 1; ++dz) {
-            for (int dx = -1; dx <= 1; ++dx) {
+        for (int dz = -2; dz <= 2; ++dz) {
+            for (int dx = -2; dx <= 2; ++dx) {
                 int64_t cx = cellX + dx;
                 int64_t cz = cellZ + dz;
 
@@ -399,7 +399,7 @@ public:
 
                 if (!candidate.valid ||
                     wy < candidate.groundY ||
-                    wy > candidate.groundY + 30) {
+                    wy > candidate.groundY + 32) {
                     continue;
                 }
 

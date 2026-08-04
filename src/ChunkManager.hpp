@@ -2,6 +2,7 @@
 #define CHUNK_MANAGER_HPP
 
 #include "Chunk.hpp"
+#include "ChunkBorderRenderer.hpp"
 #include "MeshBuilder.hpp"
 #include "MathUtils.hpp"
 #include <unordered_map>
@@ -45,6 +46,7 @@ private:
     std::unordered_map<IVec3, std::shared_ptr<Chunk>, IVec3Hash> chunks[NUM_LODS];
     std::vector<Chunk*> renderableChunks;
     std::unordered_set<Chunk*> renderableSet;
+    std::vector<Chunk*> lastSelectedChunks;
     bool gpuTraversalProbed = false;
     bool diagnosticsEnabled = false;
     uint64_t diagnosticsFrameCounter = 0;
@@ -1090,6 +1092,7 @@ public:
                 return distanceSquared(left) < distanceSquared(right);
             }
         );
+        lastSelectedChunks = selectedChunks;
 
         std::vector<SectionGpuMetadata> drawMetadata;
         std::vector<DrawElementsIndirectCommand> drawCommands;
@@ -1135,6 +1138,23 @@ public:
         geometryArena.drawIndirect(drawCommands.size());
         return true;
     }
+    void renderChunkBorders(ChunkBorderRenderer& borderRenderer, const Vec3& cameraPos, const Mat4& projection, const Mat4& view) {
+        borderRenderer.clear();
+        std::unordered_set<const Chunk*> processed;
+
+        for (const Chunk* chunk : lastSelectedChunks) {
+            if (chunk && processed.insert(chunk).second) {
+                borderRenderer.addChunkBorders(chunk, cameraPos);
+            }
+        }
+        for (const auto& pair : chunks[0]) {
+            if (pair.second && pair.second->isMeshUploaded.load() && processed.insert(pair.second.get()).second) {
+                borderRenderer.addChunkBorders(pair.second.get(), cameraPos);
+            }
+        }
+
+        borderRenderer.render(projection, view);
+    }
 
     void markGpuWorkSubmitted() {
         geometryArena.markSubmitted();
@@ -1171,8 +1191,62 @@ public:
     }
 
     // Helper for collision checking against solid voxels in world space
+    // Helper for collision checking against solid voxels in world space:
+    // reads generated LOD-0 chunk blocks first, falling back to procedural gen.
     bool isBlockSolidAt(int64_t wx, int64_t wy, int64_t wz) {
+        int64_t cx = floorDiv(wx, CHUNK_SIZE);
+        int64_t cy = floorDiv(wy, CHUNK_SIZE);
+        int64_t cz = floorDiv(wz, CHUNK_SIZE);
+        auto it = chunks[0].find(IVec3(static_cast<int>(cx), static_cast<int>(cy), static_cast<int>(cz)));
+        if (it != chunks[0].end() && it->second && it->second->isGenerated.load(std::memory_order_acquire)) {
+            int lx = static_cast<int>(wx - cx * CHUNK_SIZE);
+            int ly = static_cast<int>(wy - cy * CHUNK_SIZE);
+            int lz = static_cast<int>(wz - cz * CHUNK_SIZE);
+            uint8_t b = it->second->getBlock(lx, ly, lz);
+            return getBlockInfo(b).isSolid;
+        }
         return getBlockInfo(WorldGen::getBlockAt(wx, wy, wz)).isSolid;
+    }
+
+    // Boundary source test at local X=31
+    bool runBoundarySourceTest() {
+        auto chunkA = std::make_shared<Chunk>(IVec3(0, 0, 0), 0);
+        auto chunkB = std::make_shared<Chunk>(IVec3(1, 0, 0), 0);
+        chunkA->isEmpty = false;
+        chunkB->isEmpty = false;
+        chunkA->isGenerated.store(true, std::memory_order_release);
+        chunkB->isGenerated.store(true, std::memory_order_release);
+        chunkA->resident.store(true, std::memory_order_release);
+        chunkB->resident.store(true, std::memory_order_release);
+
+        chunks[0][IVec3(0, 0, 0)] = chunkA;
+        chunks[0][IVec3(1, 0, 0)] = chunkB;
+
+        // Boundary source light at local X=31
+        uint16_t srcLight = packLight(15, 15, 15, 15);
+        chunkA->setLight(31, 16, 16, srcLight);
+
+        enqueueLightFace(chunkA, DIR_POS_X);
+
+        std::unordered_set<Chunk*> changedChunks;
+        propagateWorldLighting(changedChunks);
+
+        uint16_t bLight = chunkB->getLight(0, 16, 16);
+        uint8_t skyB = getLightSky(bLight);
+        uint8_t rB = getLightR(bLight);
+        bool pass = (skyB >= 14) && changedChunks.count(chunkB.get());
+
+        std::cout << "\n=== BOUNDARY SOURCE TEST AT LOCAL X=31 ===\n"
+                  << "Boundary Source (Chunk 0,0,0 at X=31): Light RGB/Sky=" << static_cast<int>(getLightSky(srcLight)) << "\n"
+                  << "Propagated Target (Chunk 1,0,0 at X=0): Sky Light=" << static_cast<int>(skyB)
+                  << ", Red Light=" << static_cast<int>(rB) << "\n"
+                  << "Boundary Test Result: " << (pass ? "PASS" : "FAIL") << "\n"
+                  << "===========================================\n\n";
+
+        // Cleanup test chunks
+        chunks[0].erase(IVec3(0, 0, 0));
+        chunks[0].erase(IVec3(1, 0, 0));
+        return pass;
     }
 };
 

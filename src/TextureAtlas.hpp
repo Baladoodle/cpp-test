@@ -90,7 +90,7 @@ public:
         };
 
         // Generate each 16x16 tile
-        for (int tileID = 0; tileID < 59; ++tileID) {
+        for (int tileID = 0; tileID < 60; ++tileID) {
             currentTileID = tileID;
 
             for (int py = 0; py < TILE_SIZE; ++py) {
@@ -503,6 +503,19 @@ public:
                             }
                             break;
                         }
+                        case 59: { // Snow
+                            uint8_t value =
+                                static_cast<uint8_t>(std::clamp(242.0f + n * 18.0f, 0.0f, 255.0f));
+
+                            setPixel(
+                                px,
+                                py,
+                                value,
+                                value,
+                                static_cast<uint8_t>(std::min(255, value + 3))
+                            );
+                            break;
+                        }
                         default: { // Fallback magenta pattern
                             bool alt = (px + py) % 2 == 0;
                             setPixel(px, py, alt ? 255 : 0, 0, alt ? 255 : 0);
@@ -512,7 +525,7 @@ public:
                 }
             }
         }
-        for (int tileID = 59; tileID < MAX_TILES; ++tileID) {
+        for (int tileID = 60; tileID < MAX_TILES; ++tileID) {
             currentTileID = tileID;
             for (int py = 0; py < TILE_SIZE; ++py) {
                 for (int px = 0; px < TILE_SIZE; ++px) {

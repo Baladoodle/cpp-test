@@ -92,6 +92,14 @@ struct Chunk {
     }
 
     inline uint16_t getPaddedLight(int x, int y, int z) const {
+        if (x < 0 || x >= CHUNK_SIZE || y < 0 || y >= CHUNK_SIZE || z < 0 || z >= CHUNK_SIZE) {
+            int bx = std::clamp(x, 0, CHUNK_SIZE - 1);
+            int by = std::clamp(y, 0, CHUNK_SIZE - 1);
+            int bz = std::clamp(z, 0, CHUNK_SIZE - 1);
+            uint16_t bl = getLight(bx, by, bz);
+            if (bl == 0 && y >= 0) return packLight(0, 0, 0, 15);
+            return bl;
+        }
         return getLight(x, y, z);
     }
 };

@@ -2,6 +2,7 @@
 #define SHADER_HPP
 
 #include <string>
+#include <unordered_map>
 #include <fstream>
 #include <sstream>
 #include <iostream>

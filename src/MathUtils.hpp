@@ -54,6 +54,14 @@ struct Vec3 {
     }
 };
 
+struct Vec4 {
+    float x, y, z, w;
+
+    constexpr Vec4() : x(0.0f), y(0.0f), z(0.0f), w(0.0f) {}
+    constexpr Vec4(float s) : x(s), y(s), z(s), w(s) {}
+    constexpr Vec4(float x_, float y_, float z_, float w_) : x(x_), y(y_), z(z_), w(w_) {}
+};
+
 inline Vec3 operator*(float s, const Vec3& v) { return v * s; }
 
 struct IVec3 {

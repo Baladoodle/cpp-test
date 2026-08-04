@@ -26,6 +26,7 @@ bool firstMouse = true;
 float lastX = 640.0f, lastY = 360.0f;
 bool cursorLocked = true;
 bool showHUD = true;
+bool showChunkBorders = false;
 int diagMode = 0;
 
 static GLenum drainOpenGLErrors() {
@@ -50,6 +51,11 @@ void keyCallback(GLFWwindow* window, int key, int scancode, int action, int mods
             // Toggle HUD
             if (key == GLFW_KEY_H) {
                 showHUD = !showHUD;
+            }
+            // Toggle Chunk Borders
+            if (key == GLFW_KEY_B) {
+                showChunkBorders = !showChunkBorders;
+                std::cout << "Chunk Borders set to: " << (showChunkBorders ? "ON" : "OFF") << "\n";
             }
             if (key >= GLFW_KEY_0 && key <= GLFW_KEY_6) {
                 diagMode = key - GLFW_KEY_0;
@@ -97,6 +103,9 @@ int main(int argc, char** argv) {
         }
         if (std::string(argv[i]) == "--static-test") {
             staticTestMode = true;
+        }
+        if (std::string(argv[i]) == "--borders") {
+            showChunkBorders = true;
         }
     }
     diagnosticsMode = diagnosticsMode || staticTestMode;
@@ -244,6 +253,7 @@ int main(int argc, char** argv) {
         uniform vec3 uAbyssAmbientColor;
         uniform vec3 uSkyTint;
         uniform vec3 uFogColor;
+        uniform vec3 uCameraWorldPos;
         uniform float uTime;
         uniform int uDiagMode;
 
@@ -258,7 +268,7 @@ int main(int argc, char** argv) {
             float diff = max(dot(vNormal, normalize(uSunDir)), 0.0);
             vec3 directSun = uSunColor * (diff * 0.65 + 0.35);
 
-            // 3. Emissive RGB Block Light (Glow Crystals, Sky Quartz, Lava)
+            // 3. Emissive RGB Block Light (Glow Crystals, Lava)
             vec3 emissiveRGB = vBlockRGB * 1.4;
 
             // 4. Subsurface Scattering Translucency & Rim Lighting for Foliage
@@ -277,18 +287,51 @@ int main(int argc, char** argv) {
                 extraFoliageLight = uSunColor * (sss + rim);
             }
 
-            // Total Combined Surface Illumination
+            // 5. Shader-only Ice Biome Ambient (Replaces propagated cyan light for Sky Quartz)
+            vec3 worldPos = uCameraWorldPos + vWorldPosRelative;
+            float highSkyBiome = smoothstep(282.0, 318.0, worldPos.y);
+            float daylight = smoothstep(-0.12, 0.25, sunDirNorm.y);
+            float smoothAO = mix(0.35, 1.0, vAO);
             float sky = clamp(vSkyLight, 0.0, 1.0);
+            float exposedAmount = mix(0.18, 1.0, sky) * mix(0.45, 1.0, smoothAO);
+
+            vec3 iceBounceColor = vec3(0.07, 0.28, 0.48);
+            vec3 iceBiomeAmbient = iceBounceColor * highSkyBiome * exposedAmount * mix(0.12, 1.0, daylight);
+
+            bool isSnow = (vTexIndex == 59);
+            if (isSnow) {
+                iceBiomeAmbient = vec3(0.0);
+            }
+
+            // 6. Snow High-Albedo & Sheen
+            vec3 snowFill = vec3(0.0);
+            if (isSnow) {
+                float sunFacing = max(dot(vNormal, sunDirNorm), 0.0);
+                float snowSun = sunFacing * sky * daylight;
+                snowFill = vec3(0.14) * sky + uSunColor * snowSun * 0.35;
+            }
+
+            // Total Combined Surface Illumination
             vec3 totalLight =
                 hemiAmbient * mix(0.12, 1.0, sky) +
                 directSun * 0.8 * sky +
                 emissiveRGB +
-                extraFoliageLight;
+                extraFoliageLight +
+                iceBiomeAmbient;
 
-            // Linear Contact Ambient Occlusion (prevents Mach band / pow artifacting on greedy quads)
-            float smoothAO = mix(0.35, 1.0, vAO);
+            if (isSnow) {
+                totalLight += snowFill;
+            }
+
+            // Linear Contact Ambient Occlusion
             vec3 baseColor = texColor.rgb * totalLight * smoothAO;
 
+            // View-dependent Snow Sheen
+            if (isSnow) {
+                vec3 reflectedSun = reflect(-sunDirNorm, vNormal);
+                float snowSheen = pow(max(dot(reflectedSun, viewDir), 0.0), 24.0) * sky * daylight;
+                baseColor += uSunColor * snowSheen * 0.18;
+            }
             // Atmospheric Fog blending distant islands into sky color
             float fogStart = 2000.0;
             float fogEnd = 4608.0;
@@ -319,11 +362,17 @@ int main(int argc, char** argv) {
 
     HUD hud;
     hud.init();
+    // Initialize Chunk Border Renderer
+    ChunkBorderRenderer borderRenderer;
+    borderRenderer.init();
+
 
     // Chunk Manager
     glfwGetFramebufferSize(window, &windowWidth, &windowHeight);
     ChunkManager chunkMgr(windowWidth, windowHeight);
     chunkMgr.setDiagnosticsEnabled(diagnosticsMode);
+    // Run boundary source test at local X=31
+    chunkMgr.runBoundarySourceTest();
 
     // Timing
     float lastFrameTime = static_cast<float>(glfwGetTime());
@@ -481,6 +530,11 @@ int main(int argc, char** argv) {
         }
         auto traversalEnd = std::chrono::high_resolution_clock::now();
         GLenum traversalGlError = diagnosticsMode ? drainOpenGLErrors() : GL_NO_ERROR;
+        // 2.5 Render 32x32 Chunk Borders
+        if (showChunkBorders) {
+            chunkMgr.renderChunkBorders(borderRenderer, camera.position, projection, view);
+        }
+
 
         // 3. Render HUD UI Overlay
         auto hudStart = std::chrono::high_resolution_clock::now();
@@ -495,7 +549,7 @@ int main(int argc, char** argv) {
             ss4 << "Effective Render Distance: ~4,608 blocks (LODs 0..4)";
             ss5 << "Chunks: " << totalChunks << " loaded | Meshes: " << uploadedMeshes << " | Queued Tasks: " << pendingTasks;
             ss6 << "Mode: " << (physics.isFlying ? "FLYING (WASD + Space/Shift)" : "WALKING (Physics Collision)")
-                << (superSpeed ? " [SUPER SPEED 160m/s]" : "") << " | [F] Toggle Fly | [H] HUD | [0-6] Diag Modes (" << diagMode << ")";
+                << (superSpeed ? " [SUPER SPEED 160m/s]" : "") << " | [F] Fly | [B] Borders (" << (showChunkBorders ? "ON" : "OFF") << ") | [H] HUD | [0-6] Diag (" << diagMode << ")";
             hud.renderText(ss2.str(), 16.0f, 44.0f, 1.5f, Vec3(0.3f, 1.0f, 0.4f), static_cast<float>(windowWidth), static_cast<float>(windowHeight));
             hud.renderText(ss3.str(), 16.0f, 68.0f, 1.5f, Vec3(0.9f, 0.9f, 0.9f), static_cast<float>(windowWidth), static_cast<float>(windowHeight));
             hud.renderText(ss4.str(), 16.0f, 92.0f, 1.5f, Vec3(0.4f, 0.8f, 1.0f), static_cast<float>(windowWidth), static_cast<float>(windowHeight));

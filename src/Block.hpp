@@ -55,7 +55,7 @@ inline const BlockInfo& getBlockInfo(uint8_t type) {
         { "Oak Log",        true,  false, 0,  0,  0,  6,  5,  6 }, // 5=LogSide, 6=LogTop
         { "Leaves",         true,  false, 0,  0,  0,  7,  7,  7 },
         { "Sand",           true,  false, 0,  0,  0,  8,  8,  8 },
-        { "Sky Quartz",     true,  false, 4, 12, 15,  9,  9,  9 }, // Cyan Glow
+        { "Sky Quartz",     true,  false, 0,  0,  0, 59,  9,  9 },
         { "Water",          false, true,  0,  0,  0, 10, 10, 10 },
         { "Light Oak Leaves",true,  false, 0,  0,  0, 13, 13, 13 },
         { "Dark Oak Leaves", true,  false, 0,  0,  0, 19, 19, 19 },

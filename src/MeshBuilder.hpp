@@ -28,7 +28,10 @@ struct MeshingNeighborhood {
         if (x < -1 || x > CHUNK_SIZE ||
             y < -1 || y > CHUNK_SIZE ||
             z < -1 || z > CHUNK_SIZE) {
-            return 0;
+            int bx = std::clamp(x, 0, CHUNK_SIZE - 1);
+            int by = std::clamp(y, 0, CHUNK_SIZE - 1);
+            int bz = std::clamp(z, 0, CHUNK_SIZE - 1);
+            return light[getPaddedVoxelIndex(bx, by, bz)];
         }
         return light[getPaddedVoxelIndex(x, y, z)];
     }
@@ -55,8 +58,10 @@ private:
     }
 
     inline static uint16_t getScratchPaddedLight(const Chunk& chunk, int x, int y, int z) {
-        if (threadScratch.paddedLight.empty()) return chunk.getLight(x, y, z);
-        if (x < -1 || x > CHUNK_SIZE || y < -1 || y > CHUNK_SIZE || z < -1 || z > CHUNK_SIZE) return 0;
+        if (threadScratch.paddedLight.empty()) return chunk.getPaddedLight(x, y, z);
+        if (x < -1 || x > CHUNK_SIZE || y < -1 || y > CHUNK_SIZE || z < -1 || z > CHUNK_SIZE) {
+            return chunk.getPaddedLight(x, y, z);
+        }
         return threadScratch.paddedLight[getPaddedVoxelIndex(x, y, z)];
     }
 
@@ -402,7 +407,7 @@ public:
                 tree.tx + WorldGen::TREE_MAX_RADIUS,
                 wmx
             );
-            auto yRange = cellRange(tree.groundY, tree.groundY + 30, wmy);
+            auto yRange = cellRange(tree.groundY, tree.groundY + 32, wmy);
             auto zRange = cellRange(
                 tree.tz - WorldGen::TREE_MAX_RADIUS,
                 tree.tz + WorldGen::TREE_MAX_RADIUS,
@@ -610,48 +615,57 @@ public:
                     int outsideCount = (x < 0 || x >= CHUNK_SIZE ? 1 : 0) +
                         (y < 0 || y >= CHUNK_SIZE ? 1 : 0) +
                         (z < 0 || z >= CHUNK_SIZE ? 1 : 0);
-                    if (outsideCount != 1) continue;
+                    if (outsideCount == 0) continue;
 
-                    int direction = -1;
-                    int nx = x;
-                    int ny = y;
-                    int nz = z;
-                    if (x < 0) {
-                        direction = DIR_NEG_X;
-                        nx = CHUNK_SIZE - 1;
-                    } else if (x >= CHUNK_SIZE) {
-                        direction = DIR_POS_X;
-                        nx = 0;
-                    } else if (y < 0) {
-                        direction = DIR_NEG_Y;
-                        ny = CHUNK_SIZE - 1;
-                    } else if (y >= CHUNK_SIZE) {
-                        direction = DIR_POS_Y;
-                        ny = 0;
-                    } else if (z < 0) {
-                        direction = DIR_NEG_Z;
-                        nz = CHUNK_SIZE - 1;
-                    } else {
-                        direction = DIR_POS_Z;
-                        nz = 0;
-                    }
-
-                    const std::shared_ptr<Chunk>& neighbor = neighbors[direction];
-                    bool neighborReady = neighbor &&
-                        neighbor->resident.load(std::memory_order_acquire) &&
-                        neighbor->isGenerated.load(std::memory_order_acquire);
                     int paddedIndex = getPaddedVoxelIndex(x, y, z);
-                    if (neighborReady) {
-                        neighborhood.blocks[paddedIndex] =
-                            neighbor->getBlock(nx, ny, nz);
-                        neighborhood.light[paddedIndex] =
-                            neighbor->getLight(nx, ny, nz);
-                    } else if (y == CHUNK_SIZE &&
-                               getBlockInfo(neighborhood.blocks[paddedIndex]).isTransparent) {
-                        // A missing upper chunk is treated as open sky until
-                        // its resident neighbor can provide a real boundary.
-                        neighborhood.light[paddedIndex] = packLight(0, 0, 0, 15);
+                    if (outsideCount == 1) {
+                        int direction = -1;
+                        int nx = x;
+                        int ny = y;
+                        int nz = z;
+                        if (x < 0) {
+                            direction = DIR_NEG_X;
+                            nx = CHUNK_SIZE - 1;
+                        } else if (x >= CHUNK_SIZE) {
+                            direction = DIR_POS_X;
+                            nx = 0;
+                        } else if (y < 0) {
+                            direction = DIR_NEG_Y;
+                            ny = CHUNK_SIZE - 1;
+                        } else if (y >= CHUNK_SIZE) {
+                            direction = DIR_POS_Y;
+                            ny = 0;
+                        } else if (z < 0) {
+                            direction = DIR_NEG_Z;
+                            nz = CHUNK_SIZE - 1;
+                        } else {
+                            direction = DIR_POS_Z;
+                            nz = 0;
+                        }
+
+                        const std::shared_ptr<Chunk>& neighbor = neighbors[direction];
+                        bool neighborReady = neighbor &&
+                            neighbor->resident.load(std::memory_order_acquire) &&
+                            neighbor->isGenerated.load(std::memory_order_acquire);
+                        if (neighborReady) {
+                            neighborhood.blocks[paddedIndex] =
+                                neighbor->getBlock(nx, ny, nz);
+                            neighborhood.light[paddedIndex] =
+                                neighbor->getLight(nx, ny, nz);
+                            continue;
+                        }
                     }
+
+                    // Fallback for missing/unready neighbor or diagonal padded cell:
+                    // Inherit light from the nearest valid boundary voxel of chunk.
+                    int bx = std::clamp(x, 0, CHUNK_SIZE - 1);
+                    int by = std::clamp(y, 0, CHUNK_SIZE - 1);
+                    int bz = std::clamp(z, 0, CHUNK_SIZE - 1);
+                    uint16_t bLight = chunk.getLight(bx, by, bz);
+                    if (bLight == 0 && y >= 0 && getBlockInfo(neighborhood.blocks[paddedIndex]).isTransparent) {
+                        bLight = packLight(0, 0, 0, 15);
+                    }
+                    neighborhood.light[paddedIndex] = bLight;
                 }
             }
         }
