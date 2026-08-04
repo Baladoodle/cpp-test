@@ -88,6 +88,7 @@ public:
             }
             return leafMasks[variant][py][px] == '#';
         };
+        (void)leafMask;
 
         // Generate each 16x16 tile
         for (int tileID = 0; tileID < 60; ++tileID) {

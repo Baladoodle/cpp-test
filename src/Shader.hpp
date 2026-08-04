@@ -18,11 +18,28 @@ public:
     Shader(const char* vertexSrc, const char* fragmentSrc) {
         compile(vertexSrc, fragmentSrc);
     }
+    Shader(const Shader&) = delete;
+    Shader& operator=(const Shader&) = delete;
+
+    Shader(Shader&& other) noexcept : programID(other.programID), uniformCache(std::move(other.uniformCache)) {
+        other.programID = 0;
+    }
+
+    Shader& operator=(Shader&& other) noexcept {
+        if (this != &other) {
+            if (programID != 0) glDeleteProgram(programID);
+            programID = other.programID;
+            uniformCache = std::move(other.uniformCache);
+            other.programID = 0;
+        }
+        return *this;
+    }
+
     ~Shader() {
         if (programID) glDeleteProgram(programID);
     }
 
-    void compile(const char* vShaderCode, const char* fShaderCode) {
+    bool compile(const char* vShaderCode, const char* fShaderCode) {
         GLuint vertex = glCreateShader(GL_VERTEX_SHADER);
         glShaderSource(vertex, 1, &vShaderCode, NULL);
         glCompileShader(vertex);
@@ -33,14 +50,37 @@ public:
         glCompileShader(fragment);
         checkCompileErrors(fragment, "FRAGMENT");
 
-        programID = glCreateProgram();
-        glAttachShader(programID, vertex);
-        glAttachShader(programID, fragment);
-        glLinkProgram(programID);
-        checkCompileErrors(programID, "PROGRAM");
+        GLuint newProgram = glCreateProgram();
+        glAttachShader(newProgram, vertex);
+        glAttachShader(newProgram, fragment);
+        glLinkProgram(newProgram);
+        checkCompileErrors(newProgram, "PROGRAM");
 
         glDeleteShader(vertex);
         glDeleteShader(fragment);
+
+        GLint linked = GL_FALSE;
+        glGetProgramiv(newProgram, GL_LINK_STATUS, &linked);
+        if (linked != GL_TRUE) {
+            glDeleteProgram(newProgram);
+            return false;
+        }
+
+        if (programID != 0) glDeleteProgram(programID);
+        programID = newProgram;
+        uniformCache.clear();
+        return true;
+    }
+    bool compileFromFile(const std::string& vertexPath, const std::string& fragmentPath) {
+        std::ifstream vFile(vertexPath), fFile(fragmentPath);
+        if (!vFile.is_open() || !fFile.is_open()) {
+            std::cerr << "Failed to open shader files: " << vertexPath << ", " << fragmentPath << "\n";
+            return false;
+        }
+        std::stringstream vStream, fStream;
+        vStream << vFile.rdbuf();
+        fStream << fFile.rdbuf();
+        return compile(vStream.str().c_str(), fStream.str().c_str());
     }
 
     void compileCompute(const char* computeShaderCode) {

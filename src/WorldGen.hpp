@@ -28,7 +28,7 @@ private:
     struct SurfaceCacheEntry {
         int64_t x = -9999999;
         int64_t z = -9999999;
-        int64_t surfaceY = -999;
+        int64_t surfaceY = -1000000;
     };
 
     static inline int64_t getSurfaceYAtCached(int64_t wx, int64_t wz) {
@@ -37,17 +37,27 @@ private:
         if (cache[slot].x == wx && cache[slot].z == wz) {
             return cache[slot].surfaceY;
         }
-        int64_t sy = getSurfaceYAt(wx, wz);
+        int64_t sy = getSurfaceYAt(wx, wz, -50, 250);
         cache[slot] = { wx, wz, sy };
         return sy;
     }
+public:
 
-    static inline int64_t getSurfaceYAt(int64_t wx, int64_t wz, int64_t minY = -50, int64_t maxY = 250) {
-        int64_t startY = std::min<int64_t>(250, maxY + 4);
-        int64_t stopY = std::max<int64_t>(-50, minY);
-        for (int64_t y = startY; y >= stopY; y -= 4) {
+    static inline int64_t getSurfaceYAt(
+        int64_t wx,
+        int64_t wz,
+        int64_t minY = -1000,
+        int64_t maxY = 300
+    ) {
+        constexpr int64_t SURFACE_SCAN_STEP = 8;
+        int64_t startY = std::min<int64_t>(
+            300,
+            maxY + SURFACE_SCAN_STEP
+        );
+        int64_t stopY = std::max<int64_t>(-1000, minY);
+        for (int64_t y = startY; y >= stopY; y -= SURFACE_SCAN_STEP) {
             if (getDensity(wx, y, wz, 1) > 0.0f) {
-                for (int64_t ry = y + 4; ry >= y; --ry) {
+                for (int64_t ry = y + SURFACE_SCAN_STEP; ry >= y; --ry) {
                     if (getDensity(wx, ry, wz, 1) > 0.0f && getDensity(wx, ry + 1, wz, 1) <= 0.0f) {
                         return ry;
                     }
@@ -55,7 +65,66 @@ private:
                 return y;
             }
         }
-        return -999;
+        return -1000000;
+    }
+    static inline float smoothBand(float value) {
+        float t = std::clamp(value, 0.0f, 1.0f);
+        return t * t * (3.0f - 2.0f * t);
+    }
+    static inline float getIslandDensityBlend(float worldY) {
+        return smoothBand((worldY + 500.0f) / 500.0f);
+    }
+
+    static inline float layerBoundaryFade(float progress) {
+        // Keep the surface layer's upper edge soft across roughly 175 blocks.
+        return smoothBand(progress * 8.0f) * smoothBand((1.0f - progress) * 4.0f);
+    }
+
+    static float getNegativeLayerDensity(
+        int64_t wx,
+        int64_t wy,
+        int64_t wz,
+        int scale
+    ) {
+        constexpr int64_t MIN_NEGATIVE_WORLD_Y = -1000;
+        constexpr int64_t MAX_NEGATIVE_DENSITY_Y = -300;
+        constexpr float NEGATIVE_DENSITY_HEIGHT = 700.0f;
+        if (wy < MIN_NEGATIVE_WORLD_Y || wy > MAX_NEGATIVE_DENSITY_Y) {
+            return -1.0f;
+        }
+
+        float progress = static_cast<float>(wy - MIN_NEGATIVE_WORLD_Y) /
+            NEGATIVE_DENSITY_HEIGHT;
+        float macro = SimplexNoise::octave3D(
+            static_cast<float>(wx + 2371) * 0.0022f,
+            0.0f,
+            static_cast<float>(wz - 1789) * 0.0022f,
+            3,
+            0.5f,
+            2.0f
+        );
+        float local = SimplexNoise::eval3D(
+            static_cast<float>(wx - 1013) * 0.012f,
+            static_cast<float>(wy + 431) * 0.012f,
+            static_cast<float>(wz + 701) * 0.012f
+        );
+        float ridged = 1.0f - std::abs(SimplexNoise::eval3D(
+            static_cast<float>(wx + 811) * 0.008f,
+            static_cast<float>(wy - 613) * 0.010f,
+            static_cast<float>(wz - 947) * 0.008f
+        ));
+        float heightField = 0.44f + macro * 0.20f + local * 0.06f;
+        float density = (heightField - progress) * 3.2f + ridged * 0.18f;
+        float hollowNoise = SimplexNoise::eval3D(
+            static_cast<float>(wx) * 0.018f,
+            static_cast<float>(wy) * 0.018f,
+            static_cast<float>(wz) * 0.018f
+        );
+        if (hollowNoise > 0.62f) {
+            density -= (hollowNoise - 0.62f) * 2.8f;
+        }
+        density += scale > 1 ? local * 0.06f : local * 0.12f;
+        return density * layerBoundaryFade(progress);
     }
     static inline float distToSegmentSq(float px, float py, float pz, float x0, float y0, float z0, float x1, float y1, float z1) {
         float vx = x1 - x0, vy = y1 - y0, vz = z1 - z0;
@@ -87,6 +156,7 @@ private:
         int64_t tx = 0;
         int64_t tz = 0;
         int64_t groundY = -999;
+        int layer = -2;
         uint64_t seed = 0;
         int roll = 0;
         uint8_t leafBlock = BLOCK_AIR;
@@ -94,6 +164,33 @@ private:
         bool valid = false;
     };
 public:
+    static constexpr int NEGATIVE_LAYER_COUNT = 1;
+    static constexpr int64_t NEGATIVE_LAYER_HEIGHT = 500;
+
+    static int getNegativeLayerIndex(int64_t wy) {
+        if (wy < -1000 || wy > -500) return -1;
+        return 0;
+    }
+
+    static const char* getNegativeLayerName(int layer) {
+        static constexpr const char* names[NEGATIVE_LAYER_COUNT] = {
+            "surface layer"
+        };
+        if (layer < 0 || layer >= NEGATIVE_LAYER_COUNT) return "overworld";
+        return names[layer];
+    }
+
+    static bool isNegativeWorldY(int64_t wy) {
+        return wy >= -1000 && wy <= -500;
+    }
+    // 0 keeps the atmosphere in the surface-layer palette; 1 reaches the
+    // floating-island palette at the top of the transition void.
+    static float getSurfaceLayerBlend(float worldY) {
+        // Atmosphere transitions more slowly than terrain so the layer
+        // colors do not snap while crossing the empty space.
+        return smoothBand((worldY + 750.0f) / 1000.0f);
+    }
+
     static constexpr int64_t TREE_MAX_RADIUS = 8;
     // evaluates the tree block at one world position.
     struct TreeSite {
@@ -282,9 +379,10 @@ public:
                 float lakeNoise = getLakeNoise(tx, tz);
                 float floraPatchNoise = getFloraPatchNoise(tx, tz);
                 if (lakeNoise >= 0.72f || floraPatchNoise <= 0.40f) continue;
-
                 int64_t groundY = getSurfaceYAt(tx, tz, minWY - 32, maxWY);
-                if (groundY <= -900 || maxWY < groundY || minWY > groundY + 32) continue;
+                if (groundY < -100000 || maxWY < groundY || minWY > groundY + 32) continue;
+                int layer = getNegativeLayerIndex(groundY);
+                if (groundY < 0 && layer != 0) continue;
 
                 // groundY from getSurfaceYAt already guarantees groundDensity > 0 and aboveGroundDensity <= 0
 
@@ -316,7 +414,7 @@ public:
         int64_t wz,
         int scale
     ) {
-        if (wy < -40 || wy > 300) return BLOCK_AIR;
+        if (wy < -1000 || wy > 300) return BLOCK_AIR;
         for (const TreeSite& tree : trees) {
             if (std::abs(wx - tree.tx) > TREE_MAX_RADIUS ||
                 std::abs(wz - tree.tz) > TREE_MAX_RADIUS ||
@@ -331,7 +429,11 @@ public:
     }
 
     static uint8_t getTreeBlockAt(int64_t wx, int64_t wy, int64_t wz, int scale = 1) {
-        if (wy < -40 || wy > 300) return BLOCK_AIR;
+        if (wy < -1000 || wy > 300) return BLOCK_AIR;
+        if (wy < 0) {
+            int layer = getNegativeLayerIndex(wy);
+            if (layer != 0) return BLOCK_AIR;
+        }
 
         constexpr int64_t cellSize = 5;
         int64_t cellX = floorDiv(wx, cellSize);
@@ -359,6 +461,7 @@ public:
 
                 if (std::abs(wx - tx) > TREE_MAX_RADIUS ||
                     std::abs(wz - tz) > TREE_MAX_RADIUS) continue;
+                int requestedLayer = getNegativeLayerIndex(wy);
 
                 static thread_local TreeCandidateCacheEntry cache[2048];
                 uint32_t slot = static_cast<uint32_t>(
@@ -366,20 +469,39 @@ public:
                 );
                 TreeCandidateCacheEntry& candidate = cache[slot];
 
-                if (candidate.tx != tx || candidate.tz != tz) {
+                if (candidate.tx != tx || candidate.tz != tz ||
+                    candidate.layer != requestedLayer) {
                     candidate.tx = tx;
                     candidate.tz = tz;
+                    candidate.layer = requestedLayer;
                     candidate.valid = false;
                     candidate.groundY = -999;
 
                     float lakeNoise = getLakeNoise(tx, tz);
                     float floraPatchNoise = getFloraPatchNoise(tx, tz);
                     if (lakeNoise < 0.72f && floraPatchNoise > 0.40f) {
-                        int64_t cachedGroundY = getSurfaceYAtCached(tx, tz);
-                        if (cachedGroundY > -900) {
-                            float aboveGroundDensity = getDensity(tx, cachedGroundY + 1, tz, 1);
+                        int64_t cachedGroundY = -999;
+                        if (requestedLayer >= 0) {
+                            int64_t layerMin = -NEGATIVE_LAYER_HEIGHT *
+                                static_cast<int64_t>(requestedLayer + 1);
+                            int64_t layerMax = layerMin + NEGATIVE_LAYER_HEIGHT - 1;
+                            cachedGroundY = getSurfaceYAt(
+                                tx, tz, layerMin, layerMax
+                            );
+                        } else {
+                            cachedGroundY = getSurfaceYAtCached(tx, tz);
+                        }
+                        if (cachedGroundY > -100000) {
+                            int groundLayer = getNegativeLayerIndex(cachedGroundY);
+                            bool allowedLayer = requestedLayer < 0
+                                ? cachedGroundY >= 0
+                                : groundLayer == requestedLayer;
+                            float aboveGroundDensity = getDensity(
+                                tx, cachedGroundY + 1, tz, 1
+                            );
                             float groundDensity = getDensity(tx, cachedGroundY, tz, 1);
-                            if (groundDensity > 0.0f && aboveGroundDensity <= 0.0f) {
+                            if (allowedLayer && groundDensity > 0.0f &&
+                                aboveGroundDensity <= 0.0f) {
                                 candidate.groundY = cachedGroundY;
                                 candidate.seed = treeHash(tx, tz);
                                 candidate.roll = static_cast<int>(candidate.seed % 100);
@@ -389,7 +511,9 @@ public:
                                     BLOCK_LEAVES_DARK,
                                     BLOCK_LEAVES_WARM
                                 };
-                                candidate.leafBlock = leafShade[(candidate.seed >> 4) % 4];
+                                candidate.leafBlock = leafShade[
+                                    (candidate.seed >> 4) % 4
+                                ];
                                 candidate.logBlock = BLOCK_OAK_LOG;
                                 candidate.valid = true;
                             }
@@ -520,12 +644,16 @@ public:
     // The base field is shared by terrain and the underside formations below.
     // Keeping it separate prevents support probes from recursively sampling
     // the final density field.
-    static float getBaseDensity(int64_t wx, int64_t wy, int64_t wz, int scale = 1) {
+    static float getFloatingIslandDensity(
+        int64_t wx,
+        int64_t wy,
+        int64_t wz,
+        int scale = 1
+    ) {
         float fx = static_cast<float>(wx);
         float fy = static_cast<float>(wy);
         float fz = static_cast<float>(wz);
 
-        // Domain warping (suppressed for very coarse LODs to prevent aliasing)
         // Domain warping (consistent across all LOD scales to prevent terrain shifting between LOD levels)
         float warpX = SimplexNoise::eval3D(fx * 0.005f, fy * 0.005f, fz * 0.005f) * 40.0f;
         float warpY = SimplexNoise::eval3D(fx * 0.005f + 100.0f, fy * 0.005f, fz * 0.005f) * 20.0f;
@@ -587,120 +715,30 @@ public:
         return density;
     }
 
-    struct StalactiteSite {
-        int64_t x = 0;
-        int64_t z = 0;
-        float radius = 0.0f;
-        float length = 0.0f;
-        float leanX = 0.0f;
-        float leanZ = 0.0f;
-        float strength = 0.0f;
-    };
+    // The surface layer and floating islands meet through the existing void,
+    // so density eases from the layer's empty upper edge into the island
+    // field instead of changing fields at a single Y coordinate.
+    static float getBaseDensity(int64_t wx, int64_t wy, int64_t wz, int scale = 1) {
+        if (wy < 0) {
+            float surfaceDensity = getNegativeLayerDensity(wx, wy, wz, scale);
+            if (wy <= -500) return surfaceDensity;
 
-    static bool getNearestStalactiteSite(int64_t wx, int64_t wz, StalactiteSite& out) {
-        // Jittered cells make broad formations sparse and intentional instead
-        // of turning the entire underside into a noisy curtain.
-        constexpr int64_t cellSize = 14;
-        int64_t cellX = floorDiv(wx, cellSize);
-        int64_t cellZ = floorDiv(wz, cellSize);
-
-        float bestDistanceSq = 1000000.0f;
-        uint64_t bestHash = 0;
-        int64_t bestX = 0;
-        int64_t bestZ = 0;
-
-        for (int dz = -1; dz <= 1; ++dz) {
-            for (int dx = -1; dx <= 1; ++dx) {
-                int64_t candidateCellX = cellX + dx;
-                int64_t candidateCellZ = cellZ + dz;
-                uint64_t hash = treeHash(
-                    candidateCellX + 17321,
-                    candidateCellZ - 9277
-                );
-
-                // Roughly half of the cells contribute a feature. The empty
-                // cells leave exposed stone shelves between the forms.
-                if ((hash % 100ULL) >= 54ULL) continue;
-
-                int64_t candidateX = candidateCellX * cellSize +
-                    2 + static_cast<int64_t>((hash >> 8) % 10ULL);
-                int64_t candidateZ = candidateCellZ * cellSize +
-                    2 + static_cast<int64_t>((hash >> 16) % 10ULL);
-                float dxToSite = static_cast<float>(wx - candidateX);
-                float dzToSite = static_cast<float>(wz - candidateZ);
-                float distanceSq = dxToSite * dxToSite + dzToSite * dzToSite;
-                if (distanceSq < bestDistanceSq) {
-                    bestDistanceSq = distanceSq;
-                    bestHash = hash;
-                    bestX = candidateX;
-                    bestZ = candidateZ;
-                }
-            }
+            // Blend the extended surface edge into the lower island field
+            // instead of exposing a hard horizontal layer boundary.
+            float islandBlend = getIslandDensityBlend(static_cast<float>(wy));
+            if (wy > -300) surfaceDensity = 0.0f;
+            float islandDensity = getFloatingIslandDensity(wx, wy, wz, scale);
+            return surfaceDensity * (1.0f - islandBlend) +
+                islandDensity * islandBlend;
         }
 
-        if (bestDistanceSq >= 1000000.0f) return false;
-
-        out.x = bestX;
-        out.z = bestZ;
-        out.radius = 3.5f + static_cast<float>((bestHash >> 24) % 40ULL) * 0.10f;
-        out.length = 18.0f + static_cast<float>((bestHash >> 32) % 280ULL) * 0.10f;
-        out.leanX = (static_cast<float>((bestHash >> 42) & 0xFFULL) / 255.0f - 0.5f) * 5.0f;
-        out.leanZ = (static_cast<float>((bestHash >> 50) & 0xFFULL) / 255.0f - 0.5f) * 5.0f;
-        out.strength = 1.15f + static_cast<float>((bestHash >> 58) & 0x3FULL) / 63.0f * 0.85f;
-        return true;
+        return getFloatingIslandDensity(wx, wy, wz, scale);
     }
-
-    // Returns additional solid density for a hanging formation. The support
-    // probe looks upward by the feature's own length, anchoring the cone to a
-    // real underside while its tip fades out naturally.
-    static float getStalactiteDensity(
-        int64_t wx,
-        int64_t wy,
-        int64_t wz,
-        int scale,
-        float baseDensity
-    ) {
-        if (baseDensity > 0.0f) return 0.0f;
-
-        StalactiteSite site;
-        if (!getNearestStalactiteSite(wx, wz, site)) return 0.0f;
-
-        float supportDensity = getBaseDensity(
-            wx,
-            wy + static_cast<int64_t>(std::round(site.length)),
-            wz,
-            scale
-        );
-        float support = std::clamp((supportDensity + 0.18f) / 0.72f, 0.0f, 1.0f);
-        if (support <= 0.0f) return 0.0f;
-
-        float progress = 1.0f - support;
-        float centerX = static_cast<float>(site.x) + site.leanX * progress;
-        float centerZ = static_cast<float>(site.z) + site.leanZ * progress;
-        float radius = site.radius * (0.16f + 0.84f * support);
-        float dx = (static_cast<float>(wx) - centerX) / radius;
-        float dz = (static_cast<float>(wz) - centerZ) / radius;
-        float radial = std::sqrt(dx * dx + dz * dz);
-        float edgeNoise = SimplexNoise::eval3D(
-            static_cast<float>(wx - site.x) * 0.12f,
-            static_cast<float>(wy) * 0.035f,
-            static_cast<float>(wz - site.z) * 0.12f
-        ) * 0.10f;
-        float cone = 1.0f - radial + edgeNoise;
-        if (cone <= 0.0f) return 0.0f;
-
-        float attachment = 0.78f + 0.22f * support;
-        return cone * support * site.strength * attachment;
-    }
-
-    // Anti-aliases high-frequency detail noise for coarse LOD scales (scale > 1)
     static float getDensity(int64_t wx, int64_t wy, int64_t wz, int scale = 1) {
-        float baseDensity = getBaseDensity(wx, wy, wz, scale);
-        if (baseDensity <= 0.0f) {
-            baseDensity += getStalactiteDensity(wx, wy, wz, scale, baseDensity);
-        }
-        return baseDensity;
+        return getBaseDensity(wx, wy, wz, scale);
     }
+
+
 
     // Broad 2D habitat fields used by post-terrain features. Keeping these
     // separate from density lets one biome contain distinct local habitats.
@@ -895,6 +933,23 @@ public:
         return transition * transition * (3.0f - 2.0f * transition);
     }
 
+
+    static uint8_t getNegativeLayerBlock(
+        int layer,
+        int64_t wx,
+        int64_t wy,
+        int64_t wz,
+        bool surface,
+        bool shallow,
+        float sharpness
+    ) {
+        (void)layer; (void)wx; (void)wy; (void)wz;
+        if (surface) return BLOCK_GRASS;
+        if (shallow) return BLOCK_DIRT;
+        if (sharpness > 0.50f) return BLOCK_DEEP_STONE;
+        return BLOCK_STONE;
+    }
+
     static uint8_t getBlockAtWithDensitiesAndSharpness(
         int64_t wx,
         int64_t wy,
@@ -905,7 +960,22 @@ public:
         float above2Density,
         float sharpness
     ) {
-        if (density <= 0.0f) return BLOCK_AIR;
+        if (density <= 0.0f) {
+            return BLOCK_AIR;
+        }
+
+        int layer = getNegativeLayerIndex(wy);
+        if (layer >= 0) {
+            return getNegativeLayerBlock(
+                layer,
+                wx,
+                wy,
+                wz,
+                aboveDensity <= 0.0f,
+                above2Density <= 0.0f,
+                sharpness
+            );
+        }
 
         if (isHighSkyZone(wx, wy, wz)) {
             if (aboveDensity <= 0.0f) return BLOCK_SKY_QUARTZ;
@@ -966,11 +1036,26 @@ public:
         float density = getDensity(wx, wy, wz, scale);
 
         if (density <= 0.0f) {
+            if (wy < 0) return BLOCK_AIR;
             return getTreeBlockAt(wx, wy, wz, scale);
         }
 
         // Check block directly above to determine surface
         float aboveDensity = getDensity(wx, wy + scale, wz, scale);
+
+        int layer = getNegativeLayerIndex(wy);
+        if (layer >= 0) {
+            float above2Density = getDensity(wx, wy + 4 * scale, wz, scale);
+            return getNegativeLayerBlock(
+                layer,
+                wx,
+                wy,
+                wz,
+                aboveDensity <= 0.0f,
+                above2Density <= 0.0f,
+                0.0f
+            );
+        }
 
         // High sky island biome with a noisy spatial transition around its
         // nominal altitude boundary.
@@ -1023,7 +1108,23 @@ public:
         float aboveDensity,
         float above2Density
     ) {
-        if (density <= 0.0f) return BLOCK_AIR;
+        if (density <= 0.0f) {
+            return BLOCK_AIR;
+        }
+
+        int layer = getNegativeLayerIndex(wy);
+        if (layer >= 0) {
+            float sharpness = getDeepStoneSharpness(wx, wy, wz, scale, density);
+            return getNegativeLayerBlock(
+                layer,
+                wx,
+                wy,
+                wz,
+                aboveDensity <= 0.0f,
+                above2Density <= 0.0f,
+                sharpness
+            );
+        }
 
         if (isHighSkyZone(wx, wy, wz)) {
             if (aboveDensity <= 0.0f) return BLOCK_SKY_QUARTZ;

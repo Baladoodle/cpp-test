@@ -19,6 +19,38 @@ private:
     static const uint8_t font8x8[96][8];
 
 public:
+    HUD() = default;
+    ~HUD() {
+        if (fontTex != 0) glDeleteTextures(1, &fontTex);
+        if (vao != 0) glDeleteVertexArrays(1, &vao);
+        if (vbo != 0) glDeleteBuffers(1, &vbo);
+    }
+
+    HUD(const HUD&) = delete;
+    HUD& operator=(const HUD&) = delete;
+
+    HUD(HUD&& other) noexcept
+        : fontTex(other.fontTex), vao(other.vao), vbo(other.vbo), shader(std::move(other.shader)) {
+        other.fontTex = 0;
+        other.vao = 0;
+        other.vbo = 0;
+    }
+
+    HUD& operator=(HUD&& other) noexcept {
+        if (this != &other) {
+            if (fontTex != 0) glDeleteTextures(1, &fontTex);
+            if (vao != 0) glDeleteVertexArrays(1, &vao);
+            if (vbo != 0) glDeleteBuffers(1, &vbo);
+            fontTex = other.fontTex;
+            vao = other.vao;
+            vbo = other.vbo;
+            shader = std::move(other.shader);
+            other.fontTex = 0;
+            other.vao = 0;
+            other.vbo = 0;
+        }
+        return *this;
+    }
     void init() {
         // Generate font texture (128x64 atlas = 16x8 characters)
         std::vector<uint8_t> pixels(128 * 64 * 4, 0);

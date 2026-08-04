@@ -1,0 +1,14 @@
+# Build outputs
+/build/
+/build-release/
+/build-asan/
+/bin/
+
+# Visual outputs & PPM captures
+screenshot.ppm
+screenshot-current.png
+
+# IDEs and OS files
+.vscode/
+.idea/
+.DS_Store

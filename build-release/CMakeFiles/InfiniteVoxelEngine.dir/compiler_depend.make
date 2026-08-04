@@ -5,6 +5,7 @@ CMakeFiles/InfiniteVoxelEngine.dir/src/Main.cpp.o: /home/baladoodle/Baladoodle/P
   /home/baladoodle/Baladoodle/Programming/Minecraft/Infinite/src/Block.hpp \
   /home/baladoodle/Baladoodle/Programming/Minecraft/Infinite/src/Camera.hpp \
   /home/baladoodle/Baladoodle/Programming/Minecraft/Infinite/src/Chunk.hpp \
+  /home/baladoodle/Baladoodle/Programming/Minecraft/Infinite/src/ChunkBorderRenderer.hpp \
   /home/baladoodle/Baladoodle/Programming/Minecraft/Infinite/src/ChunkManager.hpp \
   /home/baladoodle/Baladoodle/Programming/Minecraft/Infinite/src/HUD.hpp \
   /home/baladoodle/Baladoodle/Programming/Minecraft/Infinite/src/MathUtils.hpp \
@@ -684,6 +685,10 @@ CMakeFiles/InfiniteVoxelEngine.dir/src/Main.cpp.o:
 
 /usr/include/c++/16/ios:
 
+/usr/include/c++/16/tr1/riemann_zeta.tcc:
+
+/usr/include/c++/16/initializer_list:
+
 /usr/include/epoxy/gl_generated.h:
 
 /usr/include/c++/16/bits/concept_check.h:
@@ -743,8 +748,6 @@ CMakeFiles/InfiniteVoxelEngine.dir/src/Main.cpp.o:
 /usr/include/c++/16/stdexcept:
 
 /usr/include/bits/wordsize.h:
-
-/usr/include/c++/16/bits/cpp_type_traits.h:
 
 /usr/include/bits/wctype-wchar.h:
 
@@ -816,6 +819,8 @@ CMakeFiles/InfiniteVoxelEngine.dir/src/Main.cpp.o:
 
 /usr/include/c++/16/bits/locale_classes.tcc:
 
+/usr/include/bits/stdio.h:
+
 /usr/include/asm-generic/int-ll64.h:
 
 /usr/include/asm/posix_types_64.h:
@@ -829,10 +834,6 @@ CMakeFiles/InfiniteVoxelEngine.dir/src/Main.cpp.o:
 /usr/include/asm/posix_types.h:
 
 /home/baladoodle/Baladoodle/Programming/Minecraft/Infinite/src/Mesh.hpp:
-
-/usr/include/bits/types/clockid_t.h:
-
-/usr/include/bits/stdint-intn.h:
 
 /usr/include/c++/16/clocale:
 
@@ -883,6 +884,8 @@ CMakeFiles/InfiniteVoxelEngine.dir/src/Main.cpp.o:
 /home/baladoodle/Baladoodle/Programming/Minecraft/Infinite/src/Block.hpp:
 
 /usr/include/c++/16/bits/postypes.h:
+
+/home/baladoodle/Baladoodle/Programming/Minecraft/Infinite/src/ChunkBorderRenderer.hpp:
 
 /usr/include/bits/fp-logb.h:
 
@@ -954,6 +957,10 @@ CMakeFiles/InfiniteVoxelEngine.dir/src/Main.cpp.o:
 
 /usr/include/c++/16/bits/ptr_traits.h:
 
+/usr/include/bits/stdint-intn.h:
+
+/usr/include/bits/types/clockid_t.h:
+
 /usr/lib/gcc/x86_64-pc-linux-gnu/16/include/stddef.h:
 
 /usr/include/bits/stdint-uintn.h:
@@ -1003,8 +1010,6 @@ CMakeFiles/InfiniteVoxelEngine.dir/src/Main.cpp.o:
 /home/baladoodle/Baladoodle/Programming/Minecraft/Infinite/src/Chunk.hpp:
 
 /usr/include/c++/16/bits/ostream_insert.h:
-
-/usr/include/bits/stdio.h:
 
 /usr/include/c++/16/backward/auto_ptr.h:
 
@@ -1057,6 +1062,8 @@ CMakeFiles/InfiniteVoxelEngine.dir/src/Main.cpp.o:
 /usr/include/c++/16/bits/memoryfwd.h:
 
 /usr/include/c++/16/bits/stl_construct.h:
+
+/usr/include/c++/16/bits/cpp_type_traits.h:
 
 /usr/include/c++/16/bits/cxxabi_init_exception.h:
 
@@ -1194,6 +1201,14 @@ CMakeFiles/InfiniteVoxelEngine.dir/src/Main.cpp.o:
 
 /usr/include/c++/16/bits/stl_algobase.h:
 
+/usr/include/asm-generic/bitsperlong.h:
+
+/usr/include/asm-generic/types.h:
+
+/usr/include/c++/16/debug/debug.h:
+
+/usr/include/c++/16/bits/stl_bvector.h:
+
 /usr/include/asm-generic/posix_types.h:
 
 /usr/include/c++/16/bits/uses_allocator.h:
@@ -1286,14 +1301,6 @@ CMakeFiles/InfiniteVoxelEngine.dir/src/Main.cpp.o:
 
 /usr/include/c++/16/ext/alloc_traits.h:
 
-/usr/include/asm-generic/bitsperlong.h:
-
-/usr/include/asm-generic/types.h:
-
-/usr/include/c++/16/bits/stl_bvector.h:
-
-/usr/include/c++/16/debug/debug.h:
-
 /usr/include/c++/16/bits/charconv.h:
 
 /usr/include/bits/atomic_wide_counter.h:
@@ -1303,10 +1310,6 @@ CMakeFiles/InfiniteVoxelEngine.dir/src/Main.cpp.o:
 /usr/include/bits/thread-shared-types.h:
 
 /usr/include/c++/16/ext/type_traits.h:
-
-/usr/include/c++/16/tr1/riemann_zeta.tcc:
-
-/usr/include/c++/16/initializer_list:
 
 /usr/include/c++/16/cstddef:
 

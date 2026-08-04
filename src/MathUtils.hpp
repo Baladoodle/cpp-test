@@ -200,5 +200,18 @@ struct Frustum {
         return true;
     }
 };
+inline constexpr int64_t floorDiv(int64_t a, int64_t b) {
+    int64_t res = a / b;
+    int64_t rem = a % b;
+    if (rem != 0 && ((a < 0) ^ (b < 0))) {
+        --res;
+    }
+    return res;
+}
+
+inline constexpr int worldToLocalVoxel(int64_t worldCoord, int chunkSize) {
+    int64_t chunkIdx = floorDiv(worldCoord, chunkSize);
+    return static_cast<int>(worldCoord - chunkIdx * chunkSize);
+}
 
 #endif // MATH_UTILS_HPP

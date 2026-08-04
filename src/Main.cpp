@@ -23,6 +23,8 @@ Camera camera(Vec3(0.0f, 60.0f, 0.0f));
 PhysicsController physics;
 bool keys[1024] = { false };
 bool firstMouse = true;
+static std::atomic<bool> reloadShadersRequested{false};
+
 float lastX = 640.0f, lastY = 360.0f;
 bool cursorLocked = true;
 bool showHUD = true;
@@ -40,6 +42,7 @@ static GLenum drainOpenGLErrors() {
 }
 // Key callback
 void keyCallback(GLFWwindow* window, int key, int scancode, int action, int mods) {
+    (void)scancode; (void)mods;
     if (key >= 0 && key < 1024) {
         if (action == GLFW_PRESS) {
             keys[key] = true;
@@ -57,6 +60,9 @@ void keyCallback(GLFWwindow* window, int key, int scancode, int action, int mods
                 showChunkBorders = !showChunkBorders;
                 std::cout << "Chunk Borders set to: " << (showChunkBorders ? "ON" : "OFF") << "\n";
             }
+            if (key == GLFW_KEY_R) {
+                reloadShadersRequested = true;
+            }
             if (key >= GLFW_KEY_0 && key <= GLFW_KEY_6) {
                 diagMode = key - GLFW_KEY_0;
                 std::cout << "Diagnostic Shader Mode set to: " << diagMode << "\n";
@@ -73,6 +79,7 @@ void keyCallback(GLFWwindow* window, int key, int scancode, int action, int mods
 
 // Mouse movement callback
 void cursorPosCallback(GLFWwindow* window, double xpos, double ypos) {
+    (void)window;
     if (!cursorLocked) return;
 
     if (firstMouse) {
@@ -332,10 +339,9 @@ int main(int argc, char** argv) {
                 float snowSheen = pow(max(dot(reflectedSun, viewDir), 0.0), 24.0) * sky * daylight;
                 baseColor += uSunColor * snowSheen * 0.18;
             }
-            // Atmospheric Fog blending distant islands into sky color
-            float fogStart = 2000.0;
-            float fogEnd = 4608.0;
-            float fogFactor = smoothstep(fogStart, fogEnd, vDistance);
+            // Atmospheric fog is temporarily disabled; restore this flag to re-enable it.
+            const bool fogEnabled = false;
+            float fogFactor = fogEnabled ? smoothstep(2000.0, 4608.0, vDistance) : 0.0;
             if (uDiagMode == 1) {
                 FragColor = vec4(texColor.rgb, 1.0);
             } else if (uDiagMode == 2) {
@@ -354,8 +360,11 @@ int main(int argc, char** argv) {
         }
     )";
 
-    Shader voxelShader(vShaderSrc, fShaderSrc);
-
+    Shader voxelShader;
+    if (!voxelShader.compileFromFile("assets/shaders/voxel.vert", "assets/shaders/voxel.frag")) {
+        std::cerr << "Falling back to inline voxel shaders...\n";
+        voxelShader.compile(vShaderSrc, fShaderSrc);
+    }
     // Initialize Skybox & HUD
     Skybox skybox;
     skybox.init();
@@ -455,33 +464,102 @@ int main(int argc, char** argv) {
         Vec3 sunDir(std::cos(sunAngle), std::sin(sunAngle), 0.3f);
         sunDir = sunDir.normalized();
 
-        // Vertical Altitude & Abyss Atmospheric Tinting
+        // each five-hundred-block band gets its own atmosphere.
         float camY = camera.position.y;
-        float altitudeFactor = std::clamp((camY + 150.0f) / 600.0f, 0.0f, 1.0f);
+        int negativeLayer = WorldGen::getNegativeLayerIndex(
+            static_cast<int64_t>(std::floor(camY))
+        );
 
         Vec3 sunColor(1.0f, 0.95f, 0.85f);
-        Vec3 skyTop(0.2f, 0.5f, 0.9f);
-        Vec3 skyHorizon = Vec3::lerp(Vec3(0.35f, 0.32f, 0.55f), Vec3(0.70f, 0.85f, 1.00f), altitudeFactor);
-        Vec3 fogColor = skyHorizon;
+        Vec3 skyTop;
+        Vec3 skyHorizon;
+        Vec3 skyAmbientColor;
+        Vec3 abyssAmbientColor;
 
-        Vec3 skyAmbientColor = Vec3::lerp(Vec3(0.35f, 0.45f, 0.65f), Vec3(0.55f, 0.72f, 0.95f), altitudeFactor);
-        Vec3 abyssAmbientColor = Vec3::lerp(Vec3(0.10f, 0.08f, 0.18f), Vec3(0.22f, 0.25f, 0.35f), altitudeFactor);
-        // Night time adjustments
+        float surfaceLayerBlend = WorldGen::getSurfaceLayerBlend(camY);
+
+        Vec3 surfaceSkyTop(0.015f, 0.22f, 0.18f);
+        Vec3 surfaceSkyHorizon(0.008f, 0.065f, 0.075f);
+        Vec3 surfaceSkyAmbient(0.12f, 0.42f, 0.34f);
+        Vec3 surfaceAbyssAmbient(0.008f, 0.08f, 0.09f);
+
+        float altitudeFactor = std::clamp(
+            (camY + 150.0f) / 600.0f,
+            0.0f,
+            1.0f
+        );
+        Vec3 floatingSkyTop(0.2f, 0.5f, 0.9f);
+        Vec3 floatingSkyHorizon = Vec3::lerp(
+            Vec3(0.35f, 0.32f, 0.55f),
+            Vec3(0.70f, 0.85f, 1.00f),
+            altitudeFactor
+        );
+        Vec3 floatingSkyAmbient = Vec3::lerp(
+            Vec3(0.35f, 0.45f, 0.65f),
+            Vec3(0.55f, 0.72f, 0.95f),
+            altitudeFactor
+        );
+        Vec3 floatingAbyssAmbient = Vec3::lerp(
+            Vec3(0.10f, 0.08f, 0.18f),
+            Vec3(0.22f, 0.25f, 0.35f),
+            altitudeFactor
+        );
+
+        skyTop = Vec3::lerp(surfaceSkyTop, floatingSkyTop, surfaceLayerBlend);
+        skyHorizon = Vec3::lerp(surfaceSkyHorizon, floatingSkyHorizon, surfaceLayerBlend);
+        skyAmbientColor = Vec3::lerp(surfaceSkyAmbient, floatingSkyAmbient, surfaceLayerBlend);
+        abyssAmbientColor = Vec3::lerp(surfaceAbyssAmbient, floatingAbyssAmbient, surfaceLayerBlend);
+
+        Vec3 fogColor = skyHorizon;
+        // night only dims the chosen layer palette.
         if (sunDir.y < 0.0f) {
             float nightFactor = std::clamp(-sunDir.y * 2.0f, 0.0f, 1.0f);
-            skyTop = Vec3::lerp(skyTop, Vec3(0.02f, 0.03f, 0.08f), nightFactor);
-            skyHorizon = Vec3::lerp(skyHorizon, Vec3(0.05f, 0.08f, 0.15f), nightFactor);
-            fogColor = skyHorizon;
-            skyAmbientColor = Vec3::lerp(skyAmbientColor, Vec3(0.1f, 0.12f, 0.2f), nightFactor);
-            abyssAmbientColor = Vec3::lerp(abyssAmbientColor, Vec3(0.05f, 0.06f, 0.1f), nightFactor);
-            sunColor = Vec3::lerp(sunColor, Vec3(0.2f, 0.2f, 0.3f), nightFactor);
+            skyTop = Vec3::lerp(
+                skyTop,
+                Vec3(0.02f, 0.03f, 0.08f),
+                nightFactor
+            );
+            skyHorizon = Vec3::lerp(
+                skyHorizon,
+                Vec3(0.05f, 0.08f, 0.15f),
+                nightFactor
+            );
+            surfaceSkyHorizon = Vec3::lerp(
+                surfaceSkyHorizon,
+                Vec3(0.035f, 0.055f, 0.10f),
+                nightFactor
+            );
+            floatingSkyHorizon = Vec3::lerp(
+                floatingSkyHorizon,
+                Vec3(0.065f, 0.105f, 0.19f),
+                nightFactor
+            );
+
+            skyAmbientColor = Vec3::lerp(
+                skyAmbientColor,
+                Vec3(0.1f, 0.12f, 0.2f),
+                nightFactor
+            );
+            abyssAmbientColor = Vec3::lerp(
+                abyssAmbientColor,
+                Vec3(0.05f, 0.06f, 0.1f),
+                nightFactor
+            );
+            sunColor = Vec3::lerp(
+                sunColor,
+                Vec3(0.2f, 0.2f, 0.3f),
+                nightFactor
+            );
         }
+        fogColor = skyHorizon;
 
-        // Match the skybox to the fog color so distant geometry fades into a
-        // seamless background rather than a different sky gradient.
-        skyTop = fogColor;
-        skyHorizon = fogColor;
-
+        if (reloadShadersRequested.exchange(false)) {
+            std::cout << "[HOT-RELOAD] Reloading shaders from disk...\n";
+            if (voxelShader.compileFromFile("assets/shaders/voxel.vert", "assets/shaders/voxel.frag")) {
+                std::cout << "[HOT-RELOAD] Voxel shader recompiled successfully!\n";
+            }
+            skybox.init();
+        }
         // Render pass setup
         glViewport(0, 0, windowWidth, windowHeight);
         glClearColor(fogColor.x, fogColor.y, fogColor.z, 1.0f);
@@ -494,7 +572,16 @@ int main(int argc, char** argv) {
         Frustum frustum = Frustum::extract(viewProjection);
 
         // 1. Render Skybox
-        skybox.draw(projection, view, sunDir, sunColor, skyTop, skyHorizon);
+        skybox.draw(
+            projection,
+            view,
+            sunDir,
+            sunColor,
+            skyTop,
+            skyHorizon,
+            surfaceSkyHorizon,
+            floatingSkyHorizon
+        );
 
         // 2. Render Voxel Chunks
         voxelShader.use();
@@ -542,19 +629,23 @@ int main(int argc, char** argv) {
             int totalChunks = 0, uploadedMeshes = 0, pendingTasks = 0;
             chunkMgr.getStats(totalChunks, uploadedMeshes, pendingTasks);
 
-            std::stringstream ss1, ss2, ss3, ss4, ss5, ss6;
-            ss1 << "INFINITE VOXEL ENGINE (LOD 0..4 RENDER DISTANCE)";
+            std::stringstream ss1, ss2, ss3, ss4, ss5, ss6, ss7;
+            ss1 << "INFINITE VOXEL ENGINE (LOD 0..6 RENDER DISTANCE)";
             ss2 << "FPS: " << static_cast<int>(currentFPS) << " | Frame Time: " << std::fixed << std::setprecision(1) << (1000.0f / currentFPS) << " ms";
             ss3 << "XYZ: " << std::fixed << std::setprecision(1) << camera.position.x << " / " << camera.position.y << " / " << camera.position.z;
-            ss4 << "Effective Render Distance: ~4,608 blocks (LODs 0..4)";
+            ss4 << "Effective Render Distance: ~18,432 blocks (LODs 0..6)";
             ss5 << "Chunks: " << totalChunks << " loaded | Meshes: " << uploadedMeshes << " | Queued Tasks: " << pendingTasks;
             ss6 << "Mode: " << (physics.isFlying ? "FLYING (WASD + Space/Shift)" : "WALKING (Physics Collision)")
                 << (superSpeed ? " [SUPER SPEED 160m/s]" : "") << " | [F] Fly | [B] Borders (" << (showChunkBorders ? "ON" : "OFF") << ") | [H] HUD | [0-6] Diag (" << diagMode << ")";
+            ss7 << "Biome: " << WorldGen::getNegativeLayerName(negativeLayer)
+                << " | " << WorldGen::NEGATIVE_LAYER_COUNT
+                << " layers x " << WorldGen::NEGATIVE_LAYER_HEIGHT << " blocks";
             hud.renderText(ss2.str(), 16.0f, 44.0f, 1.5f, Vec3(0.3f, 1.0f, 0.4f), static_cast<float>(windowWidth), static_cast<float>(windowHeight));
             hud.renderText(ss3.str(), 16.0f, 68.0f, 1.5f, Vec3(0.9f, 0.9f, 0.9f), static_cast<float>(windowWidth), static_cast<float>(windowHeight));
             hud.renderText(ss4.str(), 16.0f, 92.0f, 1.5f, Vec3(0.4f, 0.8f, 1.0f), static_cast<float>(windowWidth), static_cast<float>(windowHeight));
             hud.renderText(ss5.str(), 16.0f, 116.0f, 1.4f, Vec3(0.8f, 0.8f, 0.8f), static_cast<float>(windowWidth), static_cast<float>(windowHeight));
             hud.renderText(ss6.str(), 16.0f, 140.0f, 1.4f, Vec3(1.0f, 0.5f, 0.2f), static_cast<float>(windowWidth), static_cast<float>(windowHeight));
+            hud.renderText(ss7.str(), 16.0f, 164.0f, 1.4f, Vec3(0.6f, 0.9f, 1.0f), static_cast<float>(windowWidth), static_cast<float>(windowHeight));
         }
         auto hudEnd = std::chrono::high_resolution_clock::now();
         GLenum hudGlError = diagnosticsMode ? drainOpenGLErrors() : GL_NO_ERROR;

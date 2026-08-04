@@ -1,6 +1,10 @@
 #ifndef CHUNK_MANAGER_HPP
 #define CHUNK_MANAGER_HPP
 
+#include "IWorldQuery.hpp"
+#include "ChunkStore.hpp"
+#include "StreamPlanner.hpp"
+#include "Renderer.hpp"
 #include "Chunk.hpp"
 #include "ChunkBorderRenderer.hpp"
 #include "MeshBuilder.hpp"
@@ -19,14 +23,14 @@
 #include <iostream>
 #include <cmath>
 
-class ChunkManager {
+class ChunkManager : public IWorldQuery {
 public:
-    static constexpr int NUM_LODS = 5; // LOD 0 through LOD 4 active
-    const int LOD_RADII[NUM_LODS] = { 2, 2, 2, 2, 2 };
+    static constexpr int NUM_LODS = 7; // LOD 0 through LOD 6 active
+    const int LOD_RADII[NUM_LODS] = { 4, 4, 4, 4, 4, 4, 4 };
     // lower levels are requested only near the camera; coarse roots provide
     // fallback coverage while fine meshes are generated.
     static constexpr float LOD_MAX_DISTANCE[NUM_LODS] = {
-        192.0f, 384.0f, 768.0f, 1536.0f, 10000.0f
+        384.0f, 768.0f, 1536.0f, 3072.0f, 6144.0f, 12288.0f, 20000.0f
     };
 
     struct FrameDiagnostics {
@@ -41,7 +45,9 @@ public:
     };
 
 private:
-    GeometryArena geometryArena;
+    ChunkStore chunkStore;
+    Renderer renderer;
+    GeometryArena& geometryArena = renderer.getGeometryArena();
     uint64_t sceneRevision = 1;
     std::unordered_map<IVec3, std::shared_ptr<Chunk>, IVec3Hash> chunks[NUM_LODS];
     std::vector<Chunk*> renderableChunks;
@@ -55,6 +61,7 @@ private:
     static constexpr float SCREEN_SPACE_DIAMETER_THRESHOLD = 2.5f;
     static constexpr size_t MAX_GPU_UPLOAD_BYTES_PER_FRAME = 16ull * 1024ull * 1024ull;
     static constexpr size_t MAX_PENDING_GENERATION_TASKS = 4096;
+    static constexpr size_t MAX_LIGHT_NODES_PER_FRAME = 8192;
 
     inline static int64_t floorDiv(int64_t a, int64_t b) {
         int64_t res = a / b;
@@ -132,6 +139,8 @@ private:
         IVec3(-999999, -999999, -999999),
         IVec3(-999999, -999999, -999999),
         IVec3(-999999, -999999, -999999),
+        IVec3(-999999, -999999, -999999),
+        IVec3(-999999, -999999, -999999),
         IVec3(-999999, -999999, -999999)
     };
     std::vector<std::shared_ptr<Chunk>> stagedMeshQueue;
@@ -150,6 +159,7 @@ private:
     }
 
     bool shouldSkipCoarseChunk(int lod, int64_t cx, int64_t cy, int64_t cz, const Vec3& camPos) const {
+        (void)lod; (void)cx; (void)cy; (void)cz; (void)camPos;
         return false;
     }
     bool isRegionCoveredByReadyFinerChunks(
@@ -522,7 +532,10 @@ private:
         const int dy[6] = { 0,  0,  1, -1,  0,  0 };
         const int dz[6] = { 0,  0,  0,  0,  1, -1 };
 
-        while (!lightQueue.empty()) {
+        size_t processedNodes = 0;
+        while (!lightQueue.empty() &&
+               processedNodes < MAX_LIGHT_NODES_PER_FRAME) {
+            ++processedNodes;
             LightNode node = std::move(lightQueue.front());
             lightQueue.pop_front();
             if (!node.chunk ||
@@ -795,7 +808,7 @@ private:
                     }
                     continue;
                 }
-
+                chunk->setState(ChunkState::Generating);
                 auto t0 = std::chrono::high_resolution_clock::now();
                 auto neighborhood = std::make_shared<MeshingNeighborhood>();
                 MeshBuilder::generateVoxelData(*chunk, neighborhood.get());
@@ -808,6 +821,7 @@ private:
                 bool taskValid = chunk->resident.load(std::memory_order_acquire) &&
                     chunk->workToken.load(std::memory_order_acquire) == task.workToken;
                 if (taskValid) {
+                    chunk->setState(ChunkState::LightPending);
                     std::lock_guard<std::mutex> lock(lightingMutex);
                     lightingReadyQueue.push_back({
                         chunk,
@@ -840,6 +854,7 @@ private:
                     chunk->workToken.load(std::memory_order_acquire) == task.workToken &&
                     chunk->isMeshStaged.load(std::memory_order_acquire);
                 if (taskValid) {
+                    chunk->setState(ChunkState::MeshStaged);
                     size_t bytes = chunk->stagedVertices.size() * sizeof(VoxelVertex) +
                                    chunk->stagedIndices.size() * sizeof(uint32_t);
                     stagedMeshBytes.fetch_add(bytes, std::memory_order_relaxed);
@@ -864,7 +879,8 @@ private:
 
 public:
     ChunkManager(int viewportWidth = 1280, int viewportHeight = 720) {
-        if (!geometryArena.initialize()) {
+        (void)viewportWidth; (void)viewportHeight;
+        if (!renderer.initialize()) {
             std::cerr << "Failed to initialize the shared voxel geometry arena.\n";
         }
 
@@ -900,7 +916,7 @@ public:
     }
 
     void update(Vec3 cameraPos) {
-        geometryArena.advanceFrame();
+        renderer.advanceFrame();
         {
             std::lock_guard<std::mutex> cameraLock(cameraMutex);
             currentCamPos = cameraPos;
@@ -980,6 +996,7 @@ public:
                     Chunk* chunk = it->second.get();
                     if (isChunkOutOfRange(chunk, cameraPos)) {
                         chunk->resident.store(false, std::memory_order_release);
+                        chunk->setState(ChunkState::Evicting);
                         chunk->workToken.fetch_add(1, std::memory_order_acq_rel);
                         pendingNeighborhoods.erase(chunk);
                         geometryArena.release(chunk->mesh.geometry);
@@ -1055,6 +1072,7 @@ public:
         const Mat4& view,
         const Mat4& viewProjection
     ) {
+        (void)verticalFovRadians; (void)viewportWidth; (void)voxelShaderProgram; (void)view; (void)viewProjection;
         if (diagnosticsEnabled) {
             lastDiagnostics = FrameDiagnostics{};
             lastDiagnostics.frameIndex = diagnosticsFrameCounter++;
@@ -1134,8 +1152,7 @@ public:
         }
 
         geometryArena.uploadDrawData(drawMetadata, drawCommands);
-        glUseProgram(voxelShaderProgram);
-        geometryArena.drawIndirect(drawCommands.size());
+        geometryArena.drawIndirect(geometryArena.getLastDrawCommandCount());
         return true;
     }
     void renderChunkBorders(ChunkBorderRenderer& borderRenderer, const Vec3& cameraPos, const Mat4& projection, const Mat4& view) {
@@ -1157,7 +1174,7 @@ public:
     }
 
     void markGpuWorkSubmitted() {
-        geometryArena.markSubmitted();
+        renderer.markSubmitted();
     }
 
 
@@ -1190,22 +1207,12 @@ public:
         lastDiagnostics.emittedCommands = geometryArena.inspectIndirectCommands(lastDiagnostics.nodeCount);
     }
 
-    // Helper for collision checking against solid voxels in world space
-    // Helper for collision checking against solid voxels in world space:
-    // reads generated LOD-0 chunk blocks first, falling back to procedural gen.
-    bool isBlockSolidAt(int64_t wx, int64_t wy, int64_t wz) {
-        int64_t cx = floorDiv(wx, CHUNK_SIZE);
-        int64_t cy = floorDiv(wy, CHUNK_SIZE);
-        int64_t cz = floorDiv(wz, CHUNK_SIZE);
-        auto it = chunks[0].find(IVec3(static_cast<int>(cx), static_cast<int>(cy), static_cast<int>(cz)));
-        if (it != chunks[0].end() && it->second && it->second->isGenerated.load(std::memory_order_acquire)) {
-            int lx = static_cast<int>(wx - cx * CHUNK_SIZE);
-            int ly = static_cast<int>(wy - cy * CHUNK_SIZE);
-            int lz = static_cast<int>(wz - cz * CHUNK_SIZE);
-            uint8_t b = it->second->getBlock(lx, ly, lz);
-            return getBlockInfo(b).isSolid;
-        }
-        return getBlockInfo(WorldGen::getBlockAt(wx, wy, wz)).isSolid;
+    bool isBlockSolidAt(int64_t wx, int64_t wy, int64_t wz) const override {
+        return chunkStore.isBlockSolidAt(wx, wy, wz);
+    }
+
+    BlockType getBlockAt(const IVec3& worldPos) const override {
+        return chunkStore.getBlockAt(worldPos);
     }
 
     // Boundary source test at local X=31

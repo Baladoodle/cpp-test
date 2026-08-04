@@ -1,0 +1,16 @@
+{
+  "tileSize": 16,
+  "maxTiles": 256,
+  "mipLevels": 5,
+  "textureTiles": [
+    { "id": 0, "name": "dirt" },
+    { "id": 1, "name": "grass_top" },
+    { "id": 2, "name": "grass_side" },
+    { "id": 3, "name": "stone" },
+    { "id": 4, "name": "sand" },
+    { "id": 5, "name": "water" },
+    { "id": 6, "name": "wood_top" },
+    { "id": 7, "name": "wood_side" },
+    { "id": 8, "name": "leaves" }
+  ]
+}

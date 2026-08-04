@@ -6,6 +6,7 @@ CMakeFiles/InfiniteVoxelEngine.dir/src/Main.cpp.o
  /home/baladoodle/Baladoodle/Programming/Minecraft/Infinite/src/Block.hpp
  /home/baladoodle/Baladoodle/Programming/Minecraft/Infinite/src/Camera.hpp
  /home/baladoodle/Baladoodle/Programming/Minecraft/Infinite/src/Chunk.hpp
+ /home/baladoodle/Baladoodle/Programming/Minecraft/Infinite/src/ChunkBorderRenderer.hpp
  /home/baladoodle/Baladoodle/Programming/Minecraft/Infinite/src/ChunkManager.hpp
  /home/baladoodle/Baladoodle/Programming/Minecraft/Infinite/src/HUD.hpp
  /home/baladoodle/Baladoodle/Programming/Minecraft/Infinite/src/MathUtils.hpp

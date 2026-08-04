@@ -1,3 +1,5 @@
 /home/baladoodle/Baladoodle/Programming/Minecraft/Infinite/build/CMakeFiles/InfiniteVoxelEngine.dir
+/home/baladoodle/Baladoodle/Programming/Minecraft/Infinite/build/CMakeFiles/unit_tests.dir
+/home/baladoodle/Baladoodle/Programming/Minecraft/Infinite/build/CMakeFiles/test.dir
 /home/baladoodle/Baladoodle/Programming/Minecraft/Infinite/build/CMakeFiles/edit_cache.dir
 /home/baladoodle/Baladoodle/Programming/Minecraft/Infinite/build/CMakeFiles/rebuild_cache.dir

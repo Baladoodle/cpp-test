@@ -3,7 +3,7 @@
 
 #include "MathUtils.hpp"
 #include "Camera.hpp"
-#include "ChunkManager.hpp"
+#include "IWorldQuery.hpp"
 #include <cmath>
 #include <algorithm>
 
@@ -36,7 +36,7 @@ public:
 
     PhysicsController() : velocity(0, 0, 0) {}
 
-    void update(Camera& camera, ChunkManager& chunkMgr, bool keys[1024], bool superSpeed, float dt) {
+    void update(Camera& camera, const IWorldQuery& worldQuery, bool keys[1024], bool superSpeed, float dt) {
         if (dt > 0.1f) dt = 0.1f; // Cap max delta time
 
         Vec3 inputDir(0, 0, 0);
@@ -81,20 +81,20 @@ public:
         // Axis-by-axis collision resolution
         // 1. Move X
         camera.position.x += velocity.x * dt;
-        resolveCollisions(camera.position, chunkMgr, 0);
+        resolveCollisions(camera.position, worldQuery, 0);
 
         // 2. Move Y
         camera.position.y += velocity.y * dt;
         isGrounded = false;
-        resolveCollisions(camera.position, chunkMgr, 1);
+        resolveCollisions(camera.position, worldQuery, 1);
 
         // 3. Move Z
         camera.position.z += velocity.z * dt;
-        resolveCollisions(camera.position, chunkMgr, 2);
+        resolveCollisions(camera.position, worldQuery, 2);
     }
 
 private:
-    void resolveCollisions(Vec3& pos, ChunkManager& chunkMgr, int axis) {
+    void resolveCollisions(Vec3& pos, const IWorldQuery& worldQuery, int axis) {
         PlayerAABB playerBox = PlayerAABB::getAt(pos);
 
         int minX = static_cast<int>(std::floor(playerBox.minP.x));
@@ -107,7 +107,7 @@ private:
         for (int z = minZ; z <= maxZ; ++z) {
             for (int y = minY; y <= maxY; ++y) {
                 for (int x = minX; x <= maxX; ++x) {
-                    if (chunkMgr.isBlockSolidAt(x, y, z)) {
+                    if (worldQuery.isBlockSolidAt(x, y, z)) {
                         Vec3 blockMin(static_cast<float>(x), static_cast<float>(y), static_cast<float>(z));
                         Vec3 blockMax = blockMin + Vec3(1.0f);
 

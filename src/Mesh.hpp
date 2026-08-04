@@ -63,8 +63,6 @@ private:
     GLuint vao = 0;
     GLuint vbo = 0;
     GLuint ebo = 0;
-    GLuint metadataBuffer = 0;
-    GLuint indirectBuffer = 0;
     static constexpr size_t NUM_FRAME_CONTEXTS = 3;
     struct FrameContext {
         GLsync fence = 0;
@@ -77,6 +75,8 @@ private:
     FrameContext frameContexts[NUM_FRAME_CONTEXTS];
     size_t frameIndex = 0;
     bool initialized = false;
+    bool frameContextReady = true;
+    size_t lastDrawCommandCount = 0;
 
     size_t vertexCapacity = 0;
     size_t indexCapacity = 0;
@@ -291,6 +291,8 @@ public:
         glBindVertexArray(0);
         configureVertexArray();
         initialized = true;
+        frameContextReady = true;
+        lastDrawCommandCount = 0;
         return true;
     }
 
@@ -311,6 +313,8 @@ public:
         if (vao) glDeleteVertexArrays(1, &vao);
         vao = vbo = ebo = 0;
         initialized = false;
+        frameContextReady = true;
+        lastDrawCommandCount = 0;
         vertexCapacity = 0;
         indexCapacity = 0;
         freeVertexRanges.clear();
@@ -318,27 +322,33 @@ public:
     }
 
     void advanceFrame() {
-        frameIndex = (frameIndex + 1) % NUM_FRAME_CONTEXTS;
-        FrameContext& ctx = frameContexts[frameIndex];
-        if (ctx.fence) {
-            for (;;) {
-                GLenum result = glClientWaitSync(ctx.fence, GL_SYNC_FLUSH_COMMANDS_BIT, 1000000);
-                if (result == GL_ALREADY_SIGNALED || result == GL_CONDITION_SATISFIED) break;
-                if (result == GL_WAIT_FAILED) {
-                    glFinish();
-                    break;
+        for (size_t offset = 1; offset <= NUM_FRAME_CONTEXTS; ++offset) {
+            size_t candidateIndex = (frameIndex + offset) % NUM_FRAME_CONTEXTS;
+            FrameContext& candidate = frameContexts[candidateIndex];
+            if (candidate.fence) {
+                GLenum result = glClientWaitSync(candidate.fence, 0, 0);
+                if (result != GL_ALREADY_SIGNALED &&
+                    result != GL_CONDITION_SATISFIED) {
+                    continue;
+                }
+                glDeleteSync(candidate.fence);
+                candidate.fence = 0;
+            }
+
+            frameIndex = candidateIndex;
+            frameContextReady = true;
+            for (const GeometryHandle& handle : candidate.retiredGeometry) {
+                if (handle.valid) {
+                    releaseRange(freeVertexRanges, handle.vertexOffset, handle.vertexCount);
+                    releaseRange(freeIndexRanges, handle.indexOffset, handle.indexCount);
                 }
             }
-            glDeleteSync(ctx.fence);
-            ctx.fence = 0;
+            candidate.retiredGeometry.clear();
+            return;
         }
-        for (const GeometryHandle& handle : ctx.retiredGeometry) {
-            if (handle.valid) {
-                releaseRange(freeVertexRanges, handle.vertexOffset, handle.vertexCount);
-                releaseRange(freeIndexRanges, handle.indexOffset, handle.indexCount);
-            }
-        }
-        ctx.retiredGeometry.clear();
+
+        // Keep drawing from the last safe buffer instead of waiting on the gpu.
+        frameContextReady = false;
     }
 
     void markSubmitted() {
@@ -416,11 +426,15 @@ public:
         releaseRange(freeIndexRanges, handle.indexOffset, handle.indexCount);
     }
 
-    void uploadDrawData(
+    bool uploadDrawData(
         const std::vector<SectionGpuMetadata>& metadata,
         const std::vector<DrawElementsIndirectCommand>& commands
     ) {
-        if (!initialized || metadata.size() != commands.size()) return;
+        if (!initialized ||
+            !frameContextReady ||
+            metadata.size() != commands.size()) {
+            return false;
+        }
         FrameContext& ctx = frameContexts[frameIndex];
 
         size_t metadataBytes = metadata.size() * sizeof(SectionGpuMetadata);
@@ -443,6 +457,11 @@ public:
         if (indirectBytes > 0) {
             glBufferSubData(GL_DRAW_INDIRECT_BUFFER, 0, static_cast<GLsizeiptr>(indirectBytes), commands.data());
         }
+        lastDrawCommandCount = commands.size();
+        return true;
+    }
+    size_t getLastDrawCommandCount() const {
+        return lastDrawCommandCount;
     }
 
 
@@ -464,11 +483,12 @@ public:
         glBindVertexArray(0);
     }
 
-    IndirectCommandDiagnostics inspectIndirectCommands(size_t commandCount) const {
+    IndirectCommandDiagnostics inspectIndirectCommands(size_t commandCount, size_t activeFrameIndex = std::numeric_limits<size_t>::max()) const {
         IndirectCommandDiagnostics diagnostics;
         if (!initialized || commandCount == 0) return diagnostics;
+        size_t idx = (activeFrameIndex != std::numeric_limits<size_t>::max()) ? activeFrameIndex : frameIndex;
         std::vector<DrawElementsIndirectCommand> commands(commandCount);
-        glBindBuffer(GL_DRAW_INDIRECT_BUFFER, indirectBuffer);
+        glBindBuffer(GL_DRAW_INDIRECT_BUFFER, frameContexts[idx].indirectBuffer);
         glGetBufferSubData(
             GL_DRAW_INDIRECT_BUFFER,
             0,

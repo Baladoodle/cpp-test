@@ -228,15 +228,18 @@ CMakeFiles/InfiniteVoxelEngine.dir/src/Main.cpp.o: \
  /usr/include/c++/16/bits/ranges_uninitialized.h \
  /usr/include/c++/16/pstl/glue_memory_defs.h /usr/include/c++/16/atomic \
  /home/baladoodle/Baladoodle/Programming/Minecraft/Infinite/src/Mesh.hpp \
- /home/baladoodle/Baladoodle/Programming/Minecraft/Infinite/src/MeshBuilder.hpp \
- /usr/include/c++/16/queue /usr/include/c++/16/deque \
- /usr/include/c++/16/bits/stl_deque.h /usr/include/c++/16/bits/deque.tcc \
- /usr/include/c++/16/bits/stl_queue.h /usr/include/c++/16/unordered_map \
+ /home/baladoodle/Baladoodle/Programming/Minecraft/Infinite/src/ChunkBorderRenderer.hpp \
+ /usr/include/c++/16/unordered_map \
  /usr/include/c++/16/bits/unordered_map.h \
  /usr/include/c++/16/bits/hashtable.h \
  /usr/include/c++/16/bits/hashtable_policy.h \
  /usr/include/c++/16/bits/node_handle.h /usr/include/c++/16/unordered_set \
- /usr/include/c++/16/bits/unordered_set.h /usr/include/c++/16/thread \
+ /usr/include/c++/16/bits/unordered_set.h \
+ /home/baladoodle/Baladoodle/Programming/Minecraft/Infinite/src/Shader.hpp \
+ /home/baladoodle/Baladoodle/Programming/Minecraft/Infinite/src/MeshBuilder.hpp \
+ /usr/include/c++/16/queue /usr/include/c++/16/deque \
+ /usr/include/c++/16/bits/stl_deque.h /usr/include/c++/16/bits/deque.tcc \
+ /usr/include/c++/16/bits/stl_queue.h /usr/include/c++/16/thread \
  /usr/include/c++/16/stop_token /usr/include/c++/16/bits/std_thread.h \
  /usr/include/c++/16/semaphore /usr/include/c++/16/bits/semaphore_base.h \
  /usr/include/c++/16/bits/atomic_timed_wait.h \
@@ -244,7 +247,6 @@ CMakeFiles/InfiniteVoxelEngine.dir/src/Main.cpp.o: \
  /usr/include/c++/16/mutex /usr/include/c++/16/bits/std_mutex.h \
  /usr/include/c++/16/bits/unique_lock.h \
  /usr/include/c++/16/condition_variable \
- /home/baladoodle/Baladoodle/Programming/Minecraft/Infinite/src/Shader.hpp \
  /home/baladoodle/Baladoodle/Programming/Minecraft/Infinite/src/Skybox.hpp \
  /home/baladoodle/Baladoodle/Programming/Minecraft/Infinite/src/Camera.hpp \
  /home/baladoodle/Baladoodle/Programming/Minecraft/Infinite/src/Physics.hpp \
