@@ -134,9 +134,6 @@ public:
             case 1:  outerColor = Vec4(0.0f, 0.85f, 1.0f, 1.0f); break; // Cyan
             case 2:  outerColor = Vec4(0.2f, 0.9f, 0.3f, 1.0f);  break; // Green
             case 3:  outerColor = Vec4(0.9f, 0.3f, 0.9f, 1.0f);  break; // Magenta
-            case 4:  outerColor = Vec4(0.8f, 0.2f, 1.0f, 1.0f);  break; // Purple
-            case 5:  outerColor = Vec4(0.2f, 0.4f, 1.0f, 1.0f);  break; // Blue
-            case 6:  outerColor = Vec4(1.0f, 1.0f, 1.0f, 1.0f);  break; // White
             default: outerColor = Vec4(1.0f, 0.5f, 0.1f, 1.0f);  break; // Orange
         }
 

@@ -25,12 +25,12 @@
 
 class ChunkManager : public IWorldQuery {
 public:
-    static constexpr int NUM_LODS = 7; // LOD 0 through LOD 6 active
-    const int LOD_RADII[NUM_LODS] = { 4, 4, 4, 4, 4, 4, 4 };
+    static constexpr int NUM_LODS = 5; // LOD 0 through LOD 4 active
+    const int LOD_RADII[NUM_LODS] = { 2, 2, 2, 2, 2 };
     // lower levels are requested only near the camera; coarse roots provide
     // fallback coverage while fine meshes are generated.
     static constexpr float LOD_MAX_DISTANCE[NUM_LODS] = {
-        384.0f, 768.0f, 1536.0f, 3072.0f, 6144.0f, 12288.0f, 20000.0f
+        192.0f, 384.0f, 768.0f, 1536.0f, 10000.0f
     };
 
     struct FrameDiagnostics {
@@ -135,8 +135,6 @@ private:
     Vec3 currentCamPos{0, 0, 0};
     std::mutex cameraMutex;
     IVec3 lastCamChunkPos[NUM_LODS] = {
-        IVec3(-999999, -999999, -999999),
-        IVec3(-999999, -999999, -999999),
         IVec3(-999999, -999999, -999999),
         IVec3(-999999, -999999, -999999),
         IVec3(-999999, -999999, -999999),

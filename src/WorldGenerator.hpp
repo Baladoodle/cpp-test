@@ -15,7 +15,7 @@ public:
     static float getDensity(int64_t wx, int64_t wy, int64_t wz, int scale = 1) {
         return WorldGen::getDensity(wx, wy, wz, scale);
     }
-    static int64_t getSurfaceYAt(int64_t wx, int64_t wz, int64_t minY = -1000, int64_t maxY = 250) {
+    static int64_t getSurfaceYAt(int64_t wx, int64_t wz, int64_t minY = -1000, int64_t maxY = 700) {
         return WorldGen::getSurfaceYAt(wx, wz, minY, maxY);
     }
     static void generateVoxelData(Chunk& chunk, MeshingNeighborhood* neighborhood = nullptr);

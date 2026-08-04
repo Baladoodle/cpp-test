@@ -630,10 +630,10 @@ int main(int argc, char** argv) {
             chunkMgr.getStats(totalChunks, uploadedMeshes, pendingTasks);
 
             std::stringstream ss1, ss2, ss3, ss4, ss5, ss6, ss7;
-            ss1 << "INFINITE VOXEL ENGINE (LOD 0..6 RENDER DISTANCE)";
+            ss1 << "INFINITE VOXEL ENGINE (LOD 0..4 RENDER DISTANCE)";
             ss2 << "FPS: " << static_cast<int>(currentFPS) << " | Frame Time: " << std::fixed << std::setprecision(1) << (1000.0f / currentFPS) << " ms";
             ss3 << "XYZ: " << std::fixed << std::setprecision(1) << camera.position.x << " / " << camera.position.y << " / " << camera.position.z;
-            ss4 << "Effective Render Distance: ~18,432 blocks (LODs 0..6)";
+            ss4 << "Effective Render Distance: ~4,608 blocks (LODs 0..4)";
             ss5 << "Chunks: " << totalChunks << " loaded | Meshes: " << uploadedMeshes << " | Queued Tasks: " << pendingTasks;
             ss6 << "Mode: " << (physics.isFlying ? "FLYING (WASD + Space/Shift)" : "WALKING (Physics Collision)")
                 << (superSpeed ? " [SUPER SPEED 160m/s]" : "") << " | [F] Fly | [B] Borders (" << (showChunkBorders ? "ON" : "OFF") << ") | [H] HUD | [0-6] Diag (" << diagMode << ")";

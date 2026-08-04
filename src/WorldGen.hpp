@@ -37,7 +37,7 @@ private:
         if (cache[slot].x == wx && cache[slot].z == wz) {
             return cache[slot].surfaceY;
         }
-        int64_t sy = getSurfaceYAt(wx, wz, -50, 250);
+        int64_t sy = getSurfaceYAt(wx, wz, -50, 300);
         cache[slot] = { wx, wz, sy };
         return sy;
     }
@@ -47,11 +47,12 @@ public:
         int64_t wx,
         int64_t wz,
         int64_t minY = -1000,
-        int64_t maxY = 300
+        int64_t maxY = 700
     ) {
         constexpr int64_t SURFACE_SCAN_STEP = 8;
+        constexpr int64_t SURFACE_SCAN_TOP = 800;
         int64_t startY = std::min<int64_t>(
-            300,
+            SURFACE_SCAN_TOP,
             maxY + SURFACE_SCAN_STEP
         );
         int64_t stopY = std::max<int64_t>(-1000, minY);
@@ -125,6 +126,124 @@ public:
         }
         density += scale > 1 ? local * 0.06f : local * 0.12f;
         return density * layerBoundaryFade(progress);
+    }
+    struct MountainProfile {
+        float baseY = 0.0f;
+        float topY = 0.0f;
+        float height = 0.0f;
+    };
+
+    // A single low-frequency gate keeps the feature rare. The remaining
+    // fields only run inside that gate, so ordinary terrain pays for one
+    // inexpensive sample while mountain regions get the full profile.
+    static bool getMountainProfile(
+        int64_t wx,
+        int64_t wz,
+        MountainProfile& out
+    ) {
+        constexpr float REGION_SCALE = 0.00035f;
+        float region = SimplexNoise::eval3D(
+            static_cast<float>(wx + 19117) * REGION_SCALE,
+            0.0f,
+            static_cast<float>(wz - 27103) * REGION_SCALE
+        ) * 0.5f + 0.5f;
+
+        constexpr float REGION_START = 0.80f;
+        constexpr float REGION_WIDTH = 0.15f;
+        float regionBlend = smoothBand(
+            (region - REGION_START) / REGION_WIDTH
+        );
+        if (regionBlend <= 0.0f) return false;
+
+        float ridge = 1.0f - std::abs(SimplexNoise::eval3D(
+            static_cast<float>(wx - 4523) * 0.0015f,
+            0.0f,
+            static_cast<float>(wz + 17729) * 0.0015f
+        ));
+        float local = SimplexNoise::eval3D(
+            static_cast<float>(wx + 809) * 0.004f,
+            0.0f,
+            static_cast<float>(wz - 13007) * 0.004f
+        ) * 0.5f + 0.5f;
+
+        // This mirrors the surface layer's broad vertical field closely
+        // enough to bury the mountain foot in existing terrain without
+        // scanning for a surface for every density sample.
+        float layerMacro = SimplexNoise::octave3D(
+            static_cast<float>(wx + 2371) * 0.0022f,
+            0.0f,
+            static_cast<float>(wz - 1789) * 0.0022f,
+            2,
+            0.5f,
+            2.0f
+        );
+        float layerLocal = SimplexNoise::eval3D(
+            static_cast<float>(wx - 1013) * 0.012f,
+            static_cast<float>(-650 - 431) * 0.012f,
+            static_cast<float>(wz + 701) * 0.012f
+        );
+        float layerRidged = 1.0f - std::abs(SimplexNoise::eval3D(
+            static_cast<float>(wx + 811) * 0.008f,
+            static_cast<float>(-650 - 613) * 0.010f,
+            static_cast<float>(wz - 947) * 0.008f
+        ));
+        float layerProgress = std::clamp(
+            0.44f + layerMacro * 0.20f + layerLocal * 0.06f +
+                layerRidged * 0.056f,
+            0.12f,
+            0.88f
+        );
+
+        float heightShape = std::clamp(
+            0.45f + ridge * 0.40f + local * 0.15f,
+            0.0f,
+            1.0f
+        );
+        out.baseY = -1000.0f + layerProgress * 700.0f;
+        out.height = regionBlend * (320.0f + 680.0f * heightShape);
+        out.topY = out.baseY + out.height;
+        return out.height > 0.0f;
+    }
+
+    static float getMountainDensity(
+        int64_t wx,
+        int64_t wy,
+        int64_t wz,
+        int scale
+    ) {
+        (void)scale;
+        // Mountains never reach beyond this envelope. The early Y check is
+        // important for the many vertical chunks that can never contain one.
+        if (wy < -1000 || wy > 700) return 0.0f;
+
+        MountainProfile profile;
+        if (!getMountainProfile(wx, wz, profile)) return 0.0f;
+
+        constexpr float FOOT_BLEND = 64.0f;
+        float bottomY = profile.baseY - FOOT_BLEND;
+        if (static_cast<float>(wy) <= bottomY ||
+            static_cast<float>(wy) >= profile.topY) {
+            return 0.0f;
+        }
+
+        float footBlend = smoothBand(
+            (static_cast<float>(wy) - bottomY) / FOOT_BLEND
+        );
+        return (profile.topY - static_cast<float>(wy)) *
+            0.08f * footBlend;
+    }
+
+    static bool isMountainColdSurface(
+        int64_t wx,
+        int64_t wy,
+        int64_t wz
+    ) {
+        MountainProfile profile;
+        if (!getMountainProfile(wx, wz, profile)) return false;
+        float coldStart = profile.topY -
+            std::max(48.0f, profile.height * 0.18f);
+        return static_cast<float>(wy) >= coldStart &&
+            static_cast<float>(wy) < profile.topY;
     }
     static inline float distToSegmentSq(float px, float py, float pz, float x0, float y0, float z0, float x1, float y1, float z1) {
         float vx = x1 - x0, vy = y1 - y0, vz = z1 - z0;
@@ -735,7 +854,10 @@ public:
         return getFloatingIslandDensity(wx, wy, wz, scale);
     }
     static float getDensity(int64_t wx, int64_t wy, int64_t wz, int scale = 1) {
-        return getBaseDensity(wx, wy, wz, scale);
+        float baseDensity = getBaseDensity(wx, wy, wz, scale);
+        // Union the rare mountain field with existing terrain so its foot
+        // naturally merges into the surface layer and never creates a seam.
+        return std::max(baseDensity, getMountainDensity(wx, wy, wz, scale));
     }
 
 
@@ -966,6 +1088,10 @@ public:
 
         int layer = getNegativeLayerIndex(wy);
         if (layer >= 0) {
+            if (aboveDensity <= 0.0f &&
+                isMountainColdSurface(wx, wy, wz)) {
+                return BLOCK_SKY_QUARTZ;
+            }
             return getNegativeLayerBlock(
                 layer,
                 wx,
@@ -975,6 +1101,10 @@ public:
                 above2Density <= 0.0f,
                 sharpness
             );
+        }
+        if (aboveDensity <= 0.0f &&
+            isMountainColdSurface(wx, wy, wz)) {
+            return BLOCK_SKY_QUARTZ;
         }
 
         if (isHighSkyZone(wx, wy, wz)) {
@@ -1045,6 +1175,10 @@ public:
 
         int layer = getNegativeLayerIndex(wy);
         if (layer >= 0) {
+            if (aboveDensity <= 0.0f &&
+                isMountainColdSurface(wx, wy, wz)) {
+                return BLOCK_SKY_QUARTZ;
+            }
             float above2Density = getDensity(wx, wy + 4 * scale, wz, scale);
             return getNegativeLayerBlock(
                 layer,
@@ -1055,6 +1189,10 @@ public:
                 above2Density <= 0.0f,
                 0.0f
             );
+        }
+        if (aboveDensity <= 0.0f &&
+            isMountainColdSurface(wx, wy, wz)) {
+            return BLOCK_SKY_QUARTZ;
         }
 
         // High sky island biome with a noisy spatial transition around its
@@ -1114,6 +1252,10 @@ public:
 
         int layer = getNegativeLayerIndex(wy);
         if (layer >= 0) {
+            if (aboveDensity <= 0.0f &&
+                isMountainColdSurface(wx, wy, wz)) {
+                return BLOCK_SKY_QUARTZ;
+            }
             float sharpness = getDeepStoneSharpness(wx, wy, wz, scale, density);
             return getNegativeLayerBlock(
                 layer,
@@ -1126,6 +1268,10 @@ public:
             );
         }
 
+        if (aboveDensity <= 0.0f &&
+            isMountainColdSurface(wx, wy, wz)) {
+            return BLOCK_SKY_QUARTZ;
+        }
         if (isHighSkyZone(wx, wy, wz)) {
             if (aboveDensity <= 0.0f) return BLOCK_SKY_QUARTZ;
             if (getDeepStoneSharpness(wx, wy, wz, scale, density) > 0.50f) {
